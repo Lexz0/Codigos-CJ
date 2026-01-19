@@ -354,10 +354,23 @@ def barkoder_scan():
             data_json = data_field
     except Exception as e:
         return jsonify(status=False, message=f"data inválido: {e}"), 400
-
+        
+###cambio No. 1
     codigo = str(data_json.get("value","") or data_json.get("codevalue","")).strip()
-    if not codigo:
-        return jsonify(status=False, message="No se encontró 'value' en data"), 400
+        # data_json puede ser dict o lista
+        if isinstance(data_json, list):
+            if len(data_json) == 0:
+                return jsonify(status=False, message="Lista vacía en data"), 200
+            first = data_json[0]
+            codigo = str(first.get("value","") or first.get("codevalue","")).strip()
+        elif isinstance(data_json, dict):
+            codigo = str(data_json.get("value","") or data_json.get("codevalue","")).strip()
+        else:
+            return jsonify(status=False, message="Formato desconocido en data"), 200
+        
+        if not codigo:
+            return jsonify(status=False, message="No se encontró 'value' en data"), 200
+
 
     ok, msg = procesar_codigo(codigo)
     # La app puede mostrar este mensaje (si "Confirmation Feedback" está ON)
