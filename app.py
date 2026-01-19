@@ -31,7 +31,7 @@ AZURE_CLIENT_ID = os.environ["AZURE_CLIENT_ID"]
 AZURE_TENANT = os.environ.get("AZURE_TENANT", "consumers")
 MSAL_CACHE_PATH = os.environ.get("MSAL_CACHE_PATH", "msal_cache.json")
 
-SCOPES = ["User.Read", "Files.ReadWrite", "offline_access"]
+SCOPES = ["User.Read", "Files.ReadWrite"]
 AUTHORITY = f"https://login.microsoftonline.com/{AZURE_TENANT}"
 GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
 
