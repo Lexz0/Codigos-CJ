@@ -13,6 +13,9 @@ from pathlib import Path
 # =====================================================================
 app = Flask(__name__, template_folder="templates1")
 
+# Base del proyecto (para resolver rutas a /assets/fonts)
+BASE_DIR = Path(__file__).resolve().parent
+
 # =====================================================================
 # Upstash Redis REST
 # =====================================================================
@@ -61,6 +64,7 @@ ALUMNOS_XLSX_LOCAL = "alumnos.xlsx"
 SHEET_ALUMNOS = "Control Asistencia"
 SHEET_REGISTROS = "Registros"
 
+# Fuentes (puedes setear por ENV; si no, buscaremos en assets/fonts)
 FONT_TEXT = os.environ.get("FONT_TEXT", "NotoSans-Regular.ttf")
 FONT_CODE39 = os.environ.get("FONT_CODE39", "IDAutomationHC39M.ttf")
 
@@ -301,6 +305,41 @@ def tg_send_message(chat_id, text):
     return r.json()
 
 # =====================================================================
+# Helpers de fuentes (Code39 y texto) con fallback en assets/fonts
+# =====================================================================
+def _load_font_safe(path_or_name, size):
+    """
+    Intenta cargar una fuente por ruta/env y cae en:
+    - assets/fonts/IDAutomationHC39M.ttf
+    - assets/fonts/Free3of9.ttf
+    - nombre simple (si existiera en el sistema)
+    - load_default() (no barras; evita romper el flujo)
+    """
+    candidates = []
+    p = str(path_or_name or "").strip()
+    if p:
+        candidates.append(p)
+
+    candidates.append(str(BASE_DIR / "assets" / "fonts" / "IDAutomationHC39M.ttf"))
+    candidates.append(str(BASE_DIR / "assets" / "fonts" / "Free3of9.ttf"))
+
+    # Intento por nombre (si el SO la tuviera)
+    candidates.append("IDAutomationHC39M.ttf")
+    candidates.append("Free3of9.ttf")
+    candidates.append(str(BASE_DIR / "assets" / "fonts" / str(path_or_name)))
+
+    last_err = None
+    for cand in candidates:
+        try:
+            return ImageFont.truetype(cand, size)
+        except Exception as e:
+            last_err = e
+            continue
+
+    app.logger.warning(f"No se encontró una fuente válida para '{path_or_name}'. Usando fallback. Último error: {last_err}")
+    return ImageFont.load_default()
+
+# =====================================================================
 # Excel (carga/guarda)
 # =====================================================================
 def load_df():
@@ -343,9 +382,9 @@ def crear_tarjeta(nombre, codigo):
     img = Image.new("RGB", (CARD_W, CARD_H), "white")
     draw = ImageDraw.Draw(img)
 
-    f_name = ImageFont.truetype(FONT_TEXT, 64)
-    f_bar  = ImageFont.truetype(FONT_CODE39, 160)
-    f_txt  = ImageFont.truetype(FONT_TEXT, 36)
+    f_name = _load_font_safe(FONT_TEXT, 64)
+    f_bar  = _load_font_safe(FONT_CODE39, 160)  # Fuente Code39
+    f_txt  = _load_font_safe(FONT_TEXT, 36)
 
     # -- Medir título (nombre) usando textbbox --
     bbox_name = draw.textbbox((0, 0), nombre, font=f_name)
