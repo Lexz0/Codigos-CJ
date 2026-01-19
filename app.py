@@ -8,6 +8,8 @@ from flask import Flask, request, jsonify
 from PIL import Image, ImageDraw, ImageFont
 import msal
 from pathlib import Path
+import requests
+import json
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -37,6 +39,27 @@ GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
 
 app = Flask(__name__)
 
+def redis_set(key, value):
+    url = os.environ["REDIS_URL"]
+    token = os.environ["REDIS_TOKEN"]
+    return requests.post(
+        url,
+               headers={"Authorization": f"Bearer {token}"},
+        json={"key": key, "value": json.dumps(value)}
+    )
+
+def redis_get(key):
+    url = os.environ["REDIS_URL"]
+    token = os.environ["REDIS_TOKEN"]
+    r = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        json={"key": key}
+    )
+    try:
+        return json.loads(r.json().get("result", "null"))
+    except:
+        
 # ---------------- MSAL ----------------
 def _load_cache():
     cache = msal.SerializableTokenCache()
@@ -365,6 +388,7 @@ def diag():
 # ========================================================
 # NUEVO /init-auth (guarda flow.json)
 # ========================================================
+
 @app.get("/init-auth")
 def init_auth_fixed():
     try:
@@ -374,20 +398,17 @@ def init_auth_fixed():
         )
 
         flow = app_msal.initiate_device_flow(scopes=SCOPES)
-
         if "user_code" not in flow:
             return jsonify(error="No se pudo iniciar device flow"), 500
 
-        # Guardamos el flow para terminar luego
-        with open("flow.json", "w") as f:
-            json.dump(flow, f)
+        # Guardar flow en Redis
+        redis_set("device_flow", flow)
 
         return jsonify({
             "verification_uri": flow["verification_uri"],
             "user_code": flow["user_code"],
-            "message": "Ingresa a la URL y coloca el código para autorizar."
+            "message": "Ingresa el código en el navegador para autorizar."
         })
-
     except Exception as e:
         return jsonify(error=str(e)), 500
 
@@ -395,14 +416,13 @@ def init_auth_fixed():
 # ========================================================
 # NUEVO /finish-auth (usa flow.json)
 # ========================================================
+
 @app.get("/finish-auth")
 def finish_auth():
     try:
-        if not os.path.exists("flow.json"):
+        flow = redis_get("device_flow")
+        if not flow:
             return jsonify(error="No hay flow pendiente. Ejecuta /init-auth primero."), 400
-
-        with open("flow.json", "r") as f:
-            flow = json.load(f)
 
         cache = _load_cache()
         app_msal = msal.PublicClientApplication(
@@ -413,14 +433,14 @@ def finish_auth():
 
         if "access_token" in result:
             _save_cache(cache)
-            os.remove("flow.json")
+            redis_set("device_flow", None)
             return jsonify(success=True, message="Autenticado correctamente.")
 
-        else:
-            return jsonify(success=False, details=result)
+        return jsonify(success=False, details=result)
 
     except Exception as e:
         return jsonify(error=str(e)), 500
+
 
 # ---- MAIN ----
 if __name__ == "__main__":
