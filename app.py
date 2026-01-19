@@ -305,15 +305,20 @@ def tg_send_message(chat_id, text):
     return r.json()
 
 # =====================================================================
-# Helpers de fuentes (Code39 y texto) con fallback en assets/fonts
+# Helpers de fuentes (Code39 y texto) con modo estricto
 # =====================================================================
+STRICT_BARCODE_FONT = True  # Si no se encuentra Code39, lanzar error
+
 def _load_font_safe(path_or_name, size):
     """
-    Intenta cargar una fuente por ruta/env y cae en:
-    - assets/fonts/IDAutomationHC39M.ttf
-    - assets/fonts/Free3of9.ttf
-    - nombre simple (si existiera en el sistema)
-    - load_default() (no barras; evita romper el flujo)
+    Busca una fuente por:
+      1) path/env recibido (FONT_CODE39 o FONT_TEXT)
+      2) assets/fonts/IDAutomationHC39M.ttf
+      3) assets/fonts/Free3of9.ttf
+      4) nombres "IDAutomationHC39M.ttf" / "Free3of9.ttf"
+      5) assets/fonts/<path_or_name>
+    Si STRICT_BARCODE_FONT=True y no la encuentra → lanza excepción.
+    Si STRICT_BARCODE_FONT=False → usa load_default() y registra warning.
     """
     candidates = []
     p = str(path_or_name or "").strip()
@@ -326,18 +331,26 @@ def _load_font_safe(path_or_name, size):
     # Intento por nombre (si el SO la tuviera)
     candidates.append("IDAutomationHC39M.ttf")
     candidates.append("Free3of9.ttf")
-    candidates.append(str(BASE_DIR / "assets" / "fonts" / str(path_or_name)))
+    if p:
+        candidates.append(str(BASE_DIR / "assets" / "fonts" / p))
 
     last_err = None
     for cand in candidates:
         try:
-            return ImageFont.truetype(cand, size)
+            font = ImageFont.truetype(cand, size)
+            app.logger.info(f"[FONTS] Cargada fuente '{cand}' tamaño {size}")
+            return font
         except Exception as e:
             last_err = e
             continue
 
-    app.logger.warning(f"No se encontró una fuente válida para '{path_or_name}'. Usando fallback. Último error: {last_err}")
-    return ImageFont.load_default()
+    msg = f"No se encontró fuente válida para '{path_or_name}'. Intentos: {candidates}. Último error: {last_err}"
+    if STRICT_BARCODE_FONT:
+        app.logger.error(msg)
+        raise RuntimeError(msg)
+    else:
+        app.logger.warning(msg + " → Usando load_default(). (No habrá barras)")
+        return ImageFont.load_default()
 
 # =====================================================================
 # Excel (carga/guarda)
