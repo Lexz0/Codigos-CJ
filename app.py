@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import os, io, time, json, base64, hashlib, re
 from urllib.parse import quote
@@ -9,28 +8,61 @@ from PIL import Image, ImageDraw, ImageFont
 import msal
 from pathlib import Path
 
-# ------------------- REDIS (Upstash) -------------------
-def redis_set(key, value):
-    url = os.environ["REDIS_URL"]
+
+# ---------- Upstash Redis REST helpers (reemplazo) ----------
+from urllib.parse import quote as urlquote
+
+def redis_set(key, value, ttl_sec=None):
+    """
+    Usa la REST API de Upstash: POST {URL}/set/<key>/<value>[?EX=<ttl_sec>]
+    """
+    url = os.environ["REDIS_URL"].rstrip("/")
     token = os.environ["REDIS_TOKEN"]
-    return requests.post(
-        url,
+    val = json.dumps(value)
+    qs = f"?EX={int(ttl_sec)}" if ttl_sec else ""
+    r = requests.post(
+        f"{url}/set/{urlquote(key)}/{urlquote(val)}{qs}",
         headers={"Authorization": f"Bearer {token}"},
-        json={"key": key, "value": json.dumps(value)}
+        timeout=15
     )
+    r.raise_for_status()
+    return r.json().get("result") == "OK"
 
 def redis_get(key):
-    url = os.environ["REDIS_URL"]
+    """
+    GET {URL}/get/<key>  -> {"result":"<value>"} o {"result":"(nil)"}
+    """
+    url = os.environ["REDIS_URL"].rstrip("/")
+    token = os.environ["REDIS_TOKEN"]
+    r = requests.get(
+        f"{url}/get/{urlquote(key)}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=15
+    )
+    r.raise_for_status()
+    data = r.json()
+    val = data.get("result")
+    if not val or val == "(nil)":
+        return None
+    try:
+        return json.loads(val)
+    except Exception:
+        return None
+
+def redis_del(key):
+    """
+    POST {URL}/del/<key> -> {"result":1} si borró
+    """
+    url = os.environ["REDIS_URL"].rstrip("/")
     token = os.environ["REDIS_TOKEN"]
     r = requests.post(
-        url,
+        f"{url}/del/{urlquote(key)}",
         headers={"Authorization": f"Bearer {token}"},
-        json={"key": key}
+        timeout=15
     )
-    try:
-        return json.loads(r.json().get("result", "null"))
-    except:
-        return None
+    r.raise_for_status()
+    return r.json().get("result") == 1
+
 
 # ------------------- CONFIG ----------------------------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -359,7 +391,11 @@ def init_auth_fixed():
         if "user_code" not in flow:
             return jsonify(error="No se pudo iniciar device flow"), 500
 
-        redis_set("device_flow", flow)
+        
+# flow ya creado por MSAL (tienes 'expires_in')
+ttl = int(flow.get("expires_in", 900))
+redis_del("device_flow")
+
 
         return jsonify({
             "verification_uri": flow["verification_uri"],
@@ -386,7 +422,8 @@ def finish_auth():
 
         if "access_token" in result:
             _save_cache(cache)
-            redis_set("device_flow", None)
+            # tras verificar que hay access_token:redis_del("device_flow")
+
             return jsonify(success=True, message="Autenticado correctamente.")
 
         return jsonify(success=False, details=result)
