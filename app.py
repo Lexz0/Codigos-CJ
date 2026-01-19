@@ -361,6 +361,70 @@ def generar_tarjetas():
 def diag():
     return jsonify(ok=True, time=time.time())
 
+
+
+# ========================================================
+#  NUEVO MÉTODO: iniciar Device Flow y guardar flow.json
+# ========================================================
+@app.get("/init-auth")
+def init_auth_fixed():
+    try:
+        cache = _load_cache()
+        app_msal = msal.PublicClientApplication(
+            AZURE_CLIENT_ID, authority=AUTHORITY, token_cache=cache
+        )
+
+        flow = app_msal.initiate_device_flow(scopes=SCOPES)
+
+        if "user_code" not in flow:
+            return jsonify(error="No se pudo iniciar device flow"), 500
+
+        # Guardamos el flow para terminarlo después
+        with open("flow.json", "w") as f:
+            json.dump(flow, f)
+
+        return jsonify({
+            "verification_uri": flow["verification_uri"],
+            "user_code": flow["user_code"],
+            "message": "Visita la URL e introduce el código para autorizar."
+        })
+
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+
+# ========================================================
+#  NUEVO MÉTODO: completar el Device Flow (finish-auth)
+# ========================================================
+@app.get("/finish-auth")
+def finish_auth():
+    try:
+        # Cargar flow guardado
+        if not os.path.exists("flow.json"):
+            return jsonify(error="No hay flow pendiente. Ejecuta /init-auth primero."), 400
+
+        with open("flow.json", "r") as f:
+            flow = json.load(f)
+
+        cache = _load_cache()
+        app_msal = msal.PublicClientApplication(
+            AZURE_CLIENT_ID, authority=AUTHORITY, token_cache=cache
+        )
+
+        # Completar el Device Flow
+        result = app_msal.acquire_token_by_device_flow(flow)
+
+        if "access_token" in result:
+            _save_cache(cache)
+            os.remove("flow.json")
+            return jsonify(success=True, message="Autenticado correctamente.")
+        else:
+            return jsonify(success=False, result=result)
+
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+
 # ---- MAIN ----
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
