@@ -3,14 +3,19 @@ import os, io, time, json, base64, hashlib, re
 from urllib.parse import quote, quote as urlquote
 import requests
 import pandas as pd
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 from PIL import Image, ImageDraw, ImageFont
 import msal
 from pathlib import Path
 
-# =========================================================
+# =====================================================================
+# CONFIG FLASK – IMPORTANTE: especificar carpeta "templates1"
+# =====================================================================
+app = Flask(__name__, template_folder="templates1")
+
+# =====================================================================
 # Upstash Redis REST
-# =========================================================
+# =====================================================================
 def _redis_base():
     url = os.environ["REDIS_URL"].rstrip("/")
     token = os.environ["REDIS_TOKEN"]
@@ -43,9 +48,9 @@ def redis_del(key):
     r.raise_for_status()
     return True
 
-# =========================================================
-# CONFIG
-# =========================================================
+# =====================================================================
+# CONFIG GENERAL
+# =====================================================================
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 GROUP_CHAT_ID = int(os.environ["GROUP_CHAT_ID"])
 BARKODER_SECRET = os.environ["BARKODER_SECRET"]
@@ -71,11 +76,9 @@ SCOPES = ["User.Read", "Files.ReadWrite"]
 AUTHORITY = f"https://login.microsoftonline.com/{AZURE_TENANT}"
 GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
 
-app = Flask(__name__)
-
-# =========================================================
-# MSAL HELPERS
-# =========================================================
+# =====================================================================
+# MSAL
+# =====================================================================
 def _load_cache():
     cache = msal.SerializableTokenCache()
     if os.path.exists(MSAL_CACHE_PATH):
@@ -104,9 +107,9 @@ def _get_token_or_raise():
         raise RuntimeError("No hay token de Graph. Ejecuta /init-auth y luego /finish-auth.")
     return tok["access_token"]
 
-# =========================================================
+# =====================================================================
 # OneDrive / Graph
-# =========================================================
+# =====================================================================
 def _resolve_share(token):
     encoded = "u!" + base64.urlsafe_b64encode(
         ONEDRIVE_SHARE_LINK.encode("utf-8")
@@ -142,6 +145,7 @@ def upload_excel():
 
 def upload_image_to_onedrive(filename, content):
     token = _get_token_or_raise()
+
     url_check = f"{GRAPH_ROOT}/me/drive/root:/{quote(EVIDENCIAS_FOLDER)}"
     r = requests.get(url_check, headers={"Authorization": f"Bearer {token}"}, timeout=30)
 
@@ -160,9 +164,9 @@ def upload_image_to_onedrive(filename, content):
     r3 = requests.put(url_put, headers={"Authorization": f"Bearer {token}"}, data=content, timeout=120)
     r3.raise_for_status()
 
-# =========================================================
+# =====================================================================
 # Telegram
-# =========================================================
+# =====================================================================
 def tg_send_photo(chat_id, png_bytesio, caption=""):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     files = {"photo": ("tarjeta.png", png_bytesio, "image/png")}
@@ -177,9 +181,9 @@ def tg_send_message(chat_id, text):
     r.raise_for_status()
     return r.json()
 
-# =========================================================
+# =====================================================================
 # Excel
-# =========================================================
+# =====================================================================
 def load_df():
     download_excel()
     df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
@@ -213,9 +217,9 @@ def save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=False):
 
     upload_excel()
 
-# =========================================================
-# Tarjeta PNG
-# =========================================================
+# =====================================================================
+# PNG Tarjetas
+# =====================================================================
 def crear_tarjeta(nombre, codigo):
     img = Image.new("RGB", (CARD_W, CARD_H), "white")
     draw = ImageDraw.Draw(img)
@@ -240,9 +244,9 @@ def crear_tarjeta(nombre, codigo):
     buf.seek(0)
     return buf
 
-# =========================================================
-# Batch generar tarjetas
-# =========================================================
+# =====================================================================
+# Generar tarjetas
+# =====================================================================
 def generar_tarjetas_y_enviar():
     df = load_df()
     hechos = 0
@@ -272,9 +276,9 @@ def generar_tarjetas_y_enviar():
     upload_excel()
     return hechos
 
-# =========================================================
-# Barkoder webhook
-# =========================================================
+# =====================================================================
+# Webhook Barkoder
+# =====================================================================
 @app.post("/barkoder-scan")
 def barkoder_scan():
     try:
@@ -323,9 +327,9 @@ def barkoder_scan():
         app.logger.exception("Error en barkoder-scan")
         return jsonify(status=False, message=f"Excepción: {e}"), 200
 
-# =========================================================
-# Procesar código
-# =========================================================
+# =====================================================================
+# Procesar códigos
+# =====================================================================
 def procesar_codigo(codigo):
     if not CODE_REGEX.match(codigo):
         return False, "Código inválido"
@@ -350,9 +354,9 @@ def procesar_codigo(codigo):
         tg_send_message(GROUP_CHAT_ID, f"⚠️ {nombre} — {clase} — {fecha}\nNO tiene asistencias registradas.")
         return False, "Sin asistencia"
 
-# =========================================================
+# =====================================================================
 # Auth MS Graph
-# =========================================================
+# =====================================================================
 @app.get("/init-auth")
 def init_auth():
     try:
@@ -405,9 +409,9 @@ def auth_status():
     tok = _acquire_token_silent()
     return jsonify({"authenticated": bool(tok)})
 
-# =========================================================
+# =====================================================================
 # DIAG
-# =========================================================
+# =====================================================================
 @app.get("/diag")
 def diag():
     return jsonify(ok=True, time=time.time())
@@ -417,9 +421,16 @@ def debug_flow():
     flow = redis_get("device_flow")
     return jsonify({"has_flow": bool(flow), "keys": list(flow.keys()) if flow else None})
 
-# =========================================================
-# CORREGIDO: GET + POST para generar tarjetas
-# =========================================================
+# =====================================================================
+# NUEVO: Página con botón en /generar-tarjetas-ui
+# =====================================================================
+@app.get("/generar-tarjetas-ui")
+def generar_tarjetas_ui():
+    return render_template("generar_tarjetas.html")
+
+# =====================================================================
+# GET + POST para generar tarjetas
+# =====================================================================
 @app.route("/generar-tarjetas", methods=["GET", "POST"])
 def generar_tarjetas():
     if request.method == "GET":
@@ -435,8 +446,8 @@ def generar_tarjetas():
         app.logger.exception("generar-tarjetas error")
         return jsonify(status=False, error=str(e)), 500
 
-# =========================================================
+# =====================================================================
 # MAIN
-# =========================================================
+# =====================================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT","8080")))
