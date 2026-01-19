@@ -9,7 +9,6 @@ from PIL import Image, ImageDraw, ImageFont
 import msal
 from pathlib import Path
 
-
 # ------------------- REDIS (Upstash) -------------------
 def redis_set(key, value):
     url = os.environ["REDIS_URL"]
