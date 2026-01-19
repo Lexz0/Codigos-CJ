@@ -3,7 +3,7 @@ import os, io, time, json, base64, hashlib, re, random
 from urllib.parse import quote, quote as urlquote
 import requests
 import pandas as pd
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, send_file
 from PIL import Image, ImageDraw, ImageFont
 import msal
 from pathlib import Path
@@ -369,14 +369,19 @@ def crear_tarjeta(nombre, codigo):
 def generar_tarjetas_y_enviar():
     df = load_df()
     hechos = 0
+    candidatos = 0
 
     for i, row in df.iterrows():
-        codigo = str(row.get("Código","")).strip()
+        codigo = str(row.get("Código", "")).strip()
         if not codigo or not CODE_REGEX.match(codigo):
             continue
 
-        if str(row.get("Tarjeta generada","")).strip():
+        # Solo saltar si 'Tarjeta generada' realmente NO está vacía
+        tg_val = row.get("Tarjeta generada", "")
+        if not pd.isna(tg_val) and str(tg_val).strip() != "":
             continue
+
+        candidatos += 1
 
         nombre = f"{row.get('Nombres','')} {row.get('Apellidos','')}".strip()
         clase = str(row.get("Clase a la que asiste","")).strip()
@@ -393,54 +398,8 @@ def generar_tarjetas_y_enviar():
         df.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
 
     safe_upload_excel()
+    app.logger.info(f"[GEN] candidatos={candidatos} hechos={hechos}")
     return hechos
-
-
-@app.get("/generar-tarjetas-preview")
-def generar_tarjetas_preview():
-    try:
-        df = load_df()
-        resultados = []
-        total = len(df)
-
-        for _, row in df.iterrows():
-            codigo_raw = str(row.get("Código", "")).strip()
-            nombre = f"{str(row.get('Nombres','')).strip()} {str(row.get('Apellidos','')).strip()}".strip()
-            clase  = str(row.get("Clase a la que asiste","")).strip()
-            tg     = str(row.get("Tarjeta generada","")).strip()
-
-            motivo = []
-            valido = True
-
-            if not codigo_raw:
-                valido = False
-                motivo.append("Sin código")
-            elif not CODE_REGEX.match(codigo_raw):
-                valido = False
-                motivo.append("Código no cumple regex (solo A-Z, a-z, 0-9, '-', '_')")
-
-            if tg:
-                valido = False
-                motivo.append("Ya tenía 'Tarjeta generada'")
-
-            resultados.append({
-                "nombre": nombre,
-                "clase": clase,
-                "codigo": codigo_raw,
-                "seria_generado": bool(valido),
-                "motivo_si_no": ", ".join(motivo) if motivo else "OK"
-            })
-
-        candidatos = sum(1 for r in resultados if r["seria_generado"])
-        return jsonify({
-            "total_filas": total,
-            "candidatos_a_generar": candidatos,
-            "preview": resultados
-        })
-    except Exception as e:
-        app.logger.exception("preview error")
-        return jsonify(error=str(e)), 500
-
 
 # =====================================================================
 # Webhook Barkoder
@@ -587,12 +546,70 @@ def debug_flow():
     flow = redis_get("device_flow")
     return jsonify({"has_flow": bool(flow), "keys": list(flow.keys()) if flow else None})
 
+# Descarga el Excel que REALMENTE está usando el servidor
+@app.get("/_debug/alumnos.xlsx")
+def _debug_excel_download():
+    try:
+        safe_download_excel()  # baja la última versión desde OneDrive
+        return send_file(ALUMNOS_XLSX_LOCAL, as_attachment=True)
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
 # =====================================================================
 # UI con botón
 # =====================================================================
 @app.get("/generar-tarjetas-ui")
 def generar_tarjetas_ui():
     return render_template("generar_tarjetas.html")
+
+# =====================================================================
+# Preview (no modifica, solo muestra candidatos y motivos)
+# =====================================================================
+@app.get("/generar-tarjetas-preview")
+def generar_tarjetas_preview():
+    try:
+        df = load_df()
+        resultados = []
+        total = len(df)
+
+        for _, row in df.iterrows():
+            codigo_raw = str(row.get("Código", "")).strip()
+            nombre = f"{str(row.get('Nombres','')).strip()} {str(row.get('Apellidos','')).strip()}".strip()
+            clase  = str(row.get("Clase a la que asiste","")).strip()
+            tg_val = row.get("Tarjeta generada", "")
+
+            motivo = []
+            valido = True
+
+            if not codigo_raw:
+                valido = False
+                motivo.append("Sin código")
+            elif not CODE_REGEX.match(codigo_raw):
+                valido = False
+                motivo.append("Código no cumple regex (solo A-Z, a-z, 0-9, '-', '_')")
+
+            # Solo marcar como "ya generada" si NO está vacío/NaN
+            if not pd.isna(tg_val) and str(tg_val).strip() != "":
+                valido = False
+                motivo.append("Ya tenía 'Tarjeta generada'")
+
+            resultados.append({
+                "nombre": nombre or "—",
+                "clase": clase or "—",
+                "codigo": codigo_raw or "—",
+                "seria_generado": bool(valido),
+                "motivo_si_no": ", ".join(motivo) if motivo else "OK"
+            })
+
+        candidatos = sum(1 for r in resultados if r["seria_generado"])
+        return jsonify({
+            "total_filas": total,
+            "candidatos_a_generar": candidatos,
+            "preview": resultados
+        })
+    except Exception as e:
+        app.logger.exception("preview error")
+        return jsonify(error=str(e)), 500
 
 # =====================================================================
 # GET + POST para generar tarjetas
