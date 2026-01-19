@@ -356,18 +356,40 @@ def barkoder_scan():
         return jsonify(status=False, message=f"data inválido: {e}"), 400
         
 ###cambio No. 1
-        if isinstance(data_json, list):
-            if len(data_json) == 0:
-                return jsonify(status=False, message="Lista vacía en data"), 200
-            first = data_json[0]
-            codigo = str(first.get("value","") or first.get("codevalue","")).strip()
-        elif isinstance(data_json, dict):
-            codigo = str(data_json.get("value","") or data_json.get("codevalue","")).strip()
-        else:
-            return jsonify(status=False, message="Formato desconocido en data"), 200
-        
-        if not codigo:
-            return jsonify(status=False, message="No se encontró 'value' en data"), 200
+
+# PROCESAR data_json DE FORMA ROBUSTA
+codigo = None
+
+# 1) Caso: data_json es lista
+if isinstance(data_json, list):
+    if len(data_json) == 0:
+        return jsonify(status=False, message="Barkoder envió una lista vacía en 'data'"), 200
+    elemento = data_json[0]
+    if isinstance(elemento, dict):
+        codigo = (
+            elemento.get("value", "") 
+            or elemento.get("codevalue", "")
+        )
+    else:
+        return jsonify(status=False, message="El primer elemento de la lista no es un objeto válido"), 200
+
+# 2) Caso: data_json es dict
+elif isinstance(data_json, dict):
+    codigo = (
+        data_json.get("value", "") 
+        or data_json.get("codevalue", "")
+    )
+
+# 3) Caso: cualquier otro formato
+else:
+    return jsonify(status=False, message="Formato inesperado en 'data' (no es dict ni lista)"), 200
+
+# 4) Validar que hay código
+if not codigo or not str(codigo).strip():
+    return jsonify(status=False, message="No se encontró un 'value' válido en Barkoder"), 200
+
+# Normalizar
+codigo = str(codigo).strip()
 
 
     ok, msg = procesar_codigo(codigo)
