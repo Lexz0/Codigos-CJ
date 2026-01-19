@@ -347,15 +347,22 @@ def crear_tarjeta(nombre, codigo):
     f_bar  = ImageFont.truetype(FONT_CODE39, 160)
     f_txt  = ImageFont.truetype(FONT_TEXT, 36)
 
-    tw, _ = draw.textsize(nombre, font=f_name)
+    # -- Medir título (nombre) usando textbbox --
+    bbox_name = draw.textbbox((0, 0), nombre, font=f_name)
+    tw = bbox_name[2] - bbox_name[0]
     draw.text(((CARD_W - tw)/2, 40), nombre, fill="black", font=f_name)
 
+    # -- Código de barras (Code39 requiere *CODE*) --
     bar = f"*{codigo}*"
-    bw, bh = draw.textsize(bar, font=f_bar)
+    bbox_bar = draw.textbbox((0, 0), bar, font=f_bar)
+    bw = bbox_bar[2] - bbox_bar[0]
+    bh = bbox_bar[3] - bbox_bar[1]
     y_bar = (CARD_H // 2) - 60
     draw.text(((CARD_W - bw)/2, y_bar), bar, fill="black", font=f_bar)
 
-    tw2, _ = draw.textsize(codigo, font=f_txt)
+    # -- Texto del código debajo del “barcode” --
+    bbox_code = draw.textbbox((0, 0), codigo, font=f_txt)
+    tw2 = bbox_code[2] - bbox_code[0]
     draw.text(((CARD_W - tw2)/2, y_bar + bh + 10), codigo, fill="#333333", font=f_txt)
 
     buf = io.BytesIO()
