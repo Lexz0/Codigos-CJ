@@ -66,7 +66,7 @@ FONT_CODE39 = os.environ.get("FONT_CODE39", "IDAutomationHC39M.ttf")
 
 CARD_W, CARD_H = 900, 500
 
-CODE_REGEX = re.compile(r"^[A-Za-z0-9\-\_]{3,64}$")
+CODE_REGEX = re.compile(r"^\*?[A-Za-z0-9\-_]{3,64}\*?$")
 
 AZURE_CLIENT_ID = os.environ["AZURE_CLIENT_ID"]
 AZURE_TENANT = os.environ.get("AZURE_TENANT", "consumers")
