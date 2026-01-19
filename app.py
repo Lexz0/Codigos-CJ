@@ -356,8 +356,6 @@ def barkoder_scan():
         return jsonify(status=False, message=f"data inválido: {e}"), 400
         
 ###cambio No. 1
-    codigo = str(data_json.get("value","") or data_json.get("codevalue","")).strip()
-        # data_json puede ser dict o lista
         if isinstance(data_json, list):
             if len(data_json) == 0:
                 return jsonify(status=False, message="Lista vacía en data"), 200
