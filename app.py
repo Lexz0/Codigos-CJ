@@ -362,9 +362,8 @@ def diag():
     return jsonify(ok=True, time=time.time())
 
 
-
 # ========================================================
-#  NUEVO MÉTODO: iniciar Device Flow y guardar flow.json
+# NUEVO /init-auth (guarda flow.json)
 # ========================================================
 @app.get("/init-auth")
 def init_auth_fixed():
@@ -379,14 +378,14 @@ def init_auth_fixed():
         if "user_code" not in flow:
             return jsonify(error="No se pudo iniciar device flow"), 500
 
-        # Guardamos el flow para terminarlo después
+        # Guardamos el flow para terminar luego
         with open("flow.json", "w") as f:
             json.dump(flow, f)
 
         return jsonify({
             "verification_uri": flow["verification_uri"],
             "user_code": flow["user_code"],
-            "message": "Visita la URL e introduce el código para autorizar."
+            "message": "Ingresa a la URL y coloca el código para autorizar."
         })
 
     except Exception as e:
@@ -394,12 +393,11 @@ def init_auth_fixed():
 
 
 # ========================================================
-#  NUEVO MÉTODO: completar el Device Flow (finish-auth)
+# NUEVO /finish-auth (usa flow.json)
 # ========================================================
 @app.get("/finish-auth")
 def finish_auth():
     try:
-        # Cargar flow guardado
         if not os.path.exists("flow.json"):
             return jsonify(error="No hay flow pendiente. Ejecuta /init-auth primero."), 400
 
@@ -411,19 +409,18 @@ def finish_auth():
             AZURE_CLIENT_ID, authority=AUTHORITY, token_cache=cache
         )
 
-        # Completar el Device Flow
         result = app_msal.acquire_token_by_device_flow(flow)
 
         if "access_token" in result:
             _save_cache(cache)
             os.remove("flow.json")
             return jsonify(success=True, message="Autenticado correctamente.")
+
         else:
-            return jsonify(success=False, result=result)
+            return jsonify(success=False, details=result)
 
     except Exception as e:
         return jsonify(error=str(e)), 500
-
 
 # ---- MAIN ----
 if __name__ == "__main__":
