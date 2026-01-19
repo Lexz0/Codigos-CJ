@@ -395,6 +395,53 @@ def generar_tarjetas_y_enviar():
     safe_upload_excel()
     return hechos
 
+
+@app.get("/generar-tarjetas-preview")
+def generar_tarjetas_preview():
+    try:
+        df = load_df()
+        resultados = []
+        total = len(df)
+
+        for _, row in df.iterrows():
+            codigo_raw = str(row.get("Código", "")).strip()
+            nombre = f"{str(row.get('Nombres','')).strip()} {str(row.get('Apellidos','')).strip()}".strip()
+            clase  = str(row.get("Clase a la que asiste","")).strip()
+            tg     = str(row.get("Tarjeta generada","")).strip()
+
+            motivo = []
+            valido = True
+
+            if not codigo_raw:
+                valido = False
+                motivo.append("Sin código")
+            elif not CODE_REGEX.match(codigo_raw):
+                valido = False
+                motivo.append("Código no cumple regex (solo A-Z, a-z, 0-9, '-', '_')")
+
+            if tg:
+                valido = False
+                motivo.append("Ya tenía 'Tarjeta generada'")
+
+            resultados.append({
+                "nombre": nombre,
+                "clase": clase,
+                "codigo": codigo_raw,
+                "seria_generado": bool(valido),
+                "motivo_si_no": ", ".join(motivo) if motivo else "OK"
+            })
+
+        candidatos = sum(1 for r in resultados if r["seria_generado"])
+        return jsonify({
+            "total_filas": total,
+            "candidatos_a_generar": candidatos,
+            "preview": resultados
+        })
+    except Exception as e:
+        app.logger.exception("preview error")
+        return jsonify(error=str(e)), 500
+
+
 # =====================================================================
 # Webhook Barkoder
 # =====================================================================
