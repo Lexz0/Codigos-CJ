@@ -9,7 +9,7 @@ import msal
 from pathlib import Path
 
 # =====================================================================
-# CONFIG FLASK – usa tu carpeta "templates1"
+# FLASK (usa tu carpeta de plantillas "templates1")
 # =====================================================================
 app = Flask(__name__, template_folder="templates1")
 
@@ -65,7 +65,6 @@ FONT_TEXT = os.environ.get("FONT_TEXT", "NotoSans-Regular.ttf")
 FONT_CODE39 = os.environ.get("FONT_CODE39", "IDAutomationHC39M.ttf")
 
 CARD_W, CARD_H = 900, 500
-
 CODE_REGEX = re.compile(r"^[A-Za-z0-9\-\_]{3,64}$")
 
 AZURE_CLIENT_ID = os.environ["AZURE_CLIENT_ID"]
@@ -77,7 +76,7 @@ AUTHORITY = f"https://login.microsoftonline.com/{AZURE_TENANT}"
 GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
 
 # =====================================================================
-# MSAL
+# MSAL (auth)
 # =====================================================================
 def _load_cache():
     cache = msal.SerializableTokenCache()
@@ -108,7 +107,7 @@ def _get_token_or_raise():
     return tok["access_token"]
 
 # =====================================================================
-# Helpers de reintento (anti-423/429/409 y 5xx)
+# Reintentos (anti-423/429/409 y 5xx)
 # =====================================================================
 def _retry(fn, desc, max_attempts=5, base_delay=1.5):
     """
@@ -116,7 +115,7 @@ def _retry(fn, desc, max_attempts=5, base_delay=1.5):
       - 423 Locked, 429 Throttled, 409 Conflict
       - 5xx transitorios
       - errores de red (RequestException)
-    Backoff exponencial con pequeño jitter.
+    Backoff exponencial con jitter.
     """
     for attempt in range(1, max_attempts + 1):
         try:
@@ -153,6 +152,15 @@ def _resolve_share(token):
     r.raise_for_status()
     return r.json()
 
+def get_item_meta(token):
+    """Devuelve metadatos del item compartido (incluye eTag y name)."""
+    item = _resolve_share(token)
+    item_id = item["id"]
+    url = f"{GRAPH_ROOT}/drive/items/{item_id}"
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
 def download_excel():
     token = _get_token_or_raise()
     item = _resolve_share(token)
@@ -163,20 +171,86 @@ def download_excel():
     with open(ALUMNOS_XLSX_LOCAL, "wb") as f:
         f.write(r.content)
 
+def upload_excel_via_session(token, item_id):
+    """Sube ALUMNOS_XLSX_LOCAL usando upload session (chunk único para archivo pequeño)."""
+    # 1) Crear sesión con replace
+    sess_url = f"{GRAPH_ROOT}/drive/items/{item_id}/createUploadSession"
+    sess_body = {
+        "item": {
+            "@microsoft.graph.conflictBehavior": "replace",
+            "name": Path(ALUMNOS_XLSX_LOCAL).name
+        }
+    }
+    r = requests.post(
+        sess_url,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json=sess_body,
+        timeout=30
+    )
+    r.raise_for_status()
+    upload_url = r.json()["uploadUrl"]
+
+    # 2) Subir el contenido en un solo bloque
+    data = Path(ALUMNOS_XLSX_LOCAL).read_bytes()
+    total = len(data)
+    headers = {
+        "Content-Length": str(total),
+        "Content-Range": f"bytes 0-{total-1}/{total}"
+    }
+    r2 = requests.put(upload_url, headers=headers, data=data, timeout=180)
+    r2.raise_for_status()
+    return True
+
 def upload_excel():
+    """
+    Estrategia robusta:
+      A) PUT con If-Match: *
+      B) Si 412 → obtener eTag y PUT con If-Match: "<etag>"
+      C) Si vuelve a fallar → upload session (replace)
+    """
     token = _get_token_or_raise()
     item = _resolve_share(token)
     item_id = item["id"]
     url = f"{GRAPH_ROOT}/drive/items/{item_id}/content"
-    # If-Match: * para sobrescribir sin validar ETag (evita 412)
-    with open(ALUMNOS_XLSX_LOCAL, "rb") as f:
-        r = requests.put(
-            url,
-            headers={"Authorization": f"Bearer {token}", "If-Match": "*"},
-            data=f,
-            timeout=120
-        )
-    r.raise_for_status()
+
+    # --- A) If-Match: * ---
+    try:
+        with open(ALUMNOS_XLSX_LOCAL, "rb") as f:
+            r = requests.put(
+                url,
+                headers={"Authorization": f"Bearer {token}", "If-Match": "*"},
+                data=f,
+                timeout=120
+            )
+        r.raise_for_status()
+        return True
+    except requests.exceptions.HTTPError as e:
+        if getattr(e.response, "status_code", None) != 412:
+            raise
+
+    # --- B) Con eTag actual ---
+    try:
+        meta = get_item_meta(token)
+        etag = meta.get("eTag") or meta.get("@microsoft.graph.etag")
+        if not etag:
+            raise RuntimeError("No se pudo obtener eTag del archivo.")
+
+        with open(ALUMNOS_XLSX_LOCAL, "rb") as f:
+            r = requests.put(
+                url,
+                headers={"Authorization": f"Bearer {token}", "If-Match": etag},
+                data=f,
+                timeout=120
+            )
+        r.raise_for_status()
+        return True
+    except requests.exceptions.HTTPError as e:
+        if getattr(e.response, "status_code", None) != 412:
+            raise
+
+    # --- C) Upload session (replace) ---
+    upload_excel_via_session(token, item_id)
+    return True
 
 def upload_image_to_onedrive(filename, content):
     token = _get_token_or_raise()
@@ -199,7 +273,7 @@ def upload_image_to_onedrive(filename, content):
     r3 = requests.put(url_put, headers={"Authorization": f"Bearer {token}"}, data=content, timeout=120)
     r3.raise_for_status()
 
-# ----- Versiones seguras con reintentos -----
+# ----- Versiones "seguras" con reintentos -----
 def safe_download_excel():
     return _retry(download_excel, "download_excel")
 
@@ -227,10 +301,9 @@ def tg_send_message(chat_id, text):
     return r.json()
 
 # =====================================================================
-# Excel
+# Excel (carga/guarda)
 # =====================================================================
 def load_df():
-    # Usar versión segura (con reintentos) para evitar bloqueos momentáneos
     safe_download_excel()
     df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
     if "Tarjeta generada" not in df.columns:
@@ -261,7 +334,6 @@ def save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=False):
         df.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
         regs.to_excel(w, sheet_name=SHEET_REGISTROS, index=False)
 
-    # Subir Excel con reintentos
     safe_upload_excel()
 
 # =====================================================================
@@ -292,7 +364,7 @@ def crear_tarjeta(nombre, codigo):
     return buf
 
 # =====================================================================
-# Generar tarjetas
+# Generar tarjetas (batch)
 # =====================================================================
 def generar_tarjetas_y_enviar():
     df = load_df()
@@ -312,13 +384,11 @@ def generar_tarjetas_y_enviar():
         png = crear_tarjeta(nombre, codigo)
         tg_send_photo(GROUP_CHAT_ID, png, f"{nombre}\nClase: {clase}")
 
-        # Subida de imagen con reintentos
         safe_upload_image_to_onedrive(f"{nombre.replace(' ','_')}_{codigo}.png", png.getvalue())
 
         df.at[i, "Tarjeta generada"] = time.strftime("%Y-%m-%d %H:%M:%S")
         hechos += 1
 
-    # Guardar DF actualizado y subir Excel con reintentos
     with pd.ExcelWriter(ALUMNOS_XLSX_LOCAL, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
         df.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
 
@@ -459,7 +529,7 @@ def auth_status():
     return jsonify({"authenticated": bool(tok)})
 
 # =====================================================================
-# DIAG
+# Diagnóstico
 # =====================================================================
 @app.get("/diag")
 def diag():
@@ -471,7 +541,7 @@ def debug_flow():
     return jsonify({"has_flow": bool(flow), "keys": list(flow.keys()) if flow else None})
 
 # =====================================================================
-# Página con botón en /generar-tarjetas-ui
+# UI con botón
 # =====================================================================
 @app.get("/generar-tarjetas-ui")
 def generar_tarjetas_ui():
