@@ -1,0 +1,7 @@
+flask
+pandas
+openpyxl
+pillow
+requests
+gunicorn
+msal
