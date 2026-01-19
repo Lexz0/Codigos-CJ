@@ -1,0 +1,60 @@
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <title>Generar Tarjetas</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 30px;
+        }
+        button {
+            padding: 15px 25px;
+            font-size: 18px;
+            cursor: pointer;
+            background-color: #0061ff;
+            color: white;
+            border: none;
+            border-radius: 8px;
+        }
+        button:hover {
+            background-color: #0047c2;
+        }
+        #respuesta {
+            margin-top: 30px;
+            font-size: 18px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Generar Tarjetas</h1>
+
+    <p>Haz clic en el botón para generar las tarjetas pendientes y enviarlas por Telegram.</p>
+
+    <button id="btnGenerar">Generar Tarjetas</button>
+
+    <div id="respuesta"></div>
+
+    <script>
+        document.getElementById("btnGenerar").onclick = async () => {
+            const div = document.getElementById("respuesta");
+            div.textContent = "Generando tarjetas, por favor espera...";
+
+            try {
+                const resp = await fetch("/generar-tarjetas", {
+                    method: "POST"
+                });
+
+                const data = await resp.json();
+                div.textContent = JSON.stringify(data, null, 2);
+            } catch (err) {
+                div.textContent = "Error: " + err;
+            }
+        };
+    </script>
+</body>
+</html>
