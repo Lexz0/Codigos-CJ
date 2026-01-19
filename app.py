@@ -391,11 +391,6 @@ if not codigo or not str(codigo).strip():
 # Normalizar
 codigo = str(codigo).strip()
 
-
-    ok, msg = procesar_codigo(codigo)
-    # La app puede mostrar este mensaje (si "Confirmation Feedback" está ON)
-    return jsonify(status=bool(ok), message=msg), 200
-
 @app.get("/diag")
 def diag():
     return jsonify(ok=True, time=time.time())
