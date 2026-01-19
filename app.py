@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, io, time, json, base64, hashlib, re
+import os, io, time, json, base64, hashlib, re, random
 from urllib.parse import quote, quote as urlquote
 import requests
 import pandas as pd
@@ -9,7 +9,7 @@ import msal
 from pathlib import Path
 
 # =====================================================================
-# CONFIG FLASK – IMPORTANTE: especificar carpeta "templates1"
+# CONFIG FLASK – usa tu carpeta "templates1"
 # =====================================================================
 app = Flask(__name__, template_folder="templates1")
 
@@ -66,7 +66,7 @@ FONT_CODE39 = os.environ.get("FONT_CODE39", "IDAutomationHC39M.ttf")
 
 CARD_W, CARD_H = 900, 500
 
-CODE_REGEX = re.compile(r"^\*?[A-Za-z0-9\-_]{3,64}\*?$")
+CODE_REGEX = re.compile(r"^[A-Za-z0-9\-\_]{3,64}$")
 
 AZURE_CLIENT_ID = os.environ["AZURE_CLIENT_ID"]
 AZURE_TENANT = os.environ.get("AZURE_TENANT", "consumers")
@@ -108,6 +108,35 @@ def _get_token_or_raise():
     return tok["access_token"]
 
 # =====================================================================
+# Helpers de reintento (anti-423/429/409 y 5xx)
+# =====================================================================
+def _retry(fn, desc, max_attempts=5, base_delay=1.5):
+    """
+    Reintenta fn() capturando:
+      - 423 Locked, 429 Throttled, 409 Conflict
+      - 5xx transitorios
+      - errores de red (RequestException)
+    Backoff exponencial con pequeño jitter.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except requests.exceptions.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            if status in (423, 429, 409) or (status and 500 <= status < 600):
+                sleep = base_delay * (2 ** (attempt - 1)) + 0.2 * random.random()
+                app.logger.warning(f"{desc} falló con {status}. Reintentando {attempt}/{max_attempts} en {sleep:.1f}s...")
+                time.sleep(sleep)
+                continue
+            raise
+        except requests.exceptions.RequestException as e:
+            sleep = base_delay * (2 ** (attempt - 1)) + 0.2 * random.random()
+            app.logger.warning(f"{desc} error de red {e}. Reintentando {attempt}/{max_attempts} en {sleep:.1f}s...")
+            time.sleep(sleep)
+            continue
+    raise RuntimeError(f"{desc} no se pudo completar tras {max_attempts} intentos.")
+
+# =====================================================================
 # OneDrive / Graph
 # =====================================================================
 def _resolve_share(token):
@@ -139,8 +168,14 @@ def upload_excel():
     item = _resolve_share(token)
     item_id = item["id"]
     url = f"{GRAPH_ROOT}/drive/items/{item_id}/content"
+    # If-Match: * para sobrescribir sin validar ETag (evita 412)
     with open(ALUMNOS_XLSX_LOCAL, "rb") as f:
-        r = requests.put(url, headers={"Authorization": f"Bearer {token}"}, data=f, timeout=120)
+        r = requests.put(
+            url,
+            headers={"Authorization": f"Bearer {token}", "If-Match": "*"},
+            data=f,
+            timeout=120
+        )
     r.raise_for_status()
 
 def upload_image_to_onedrive(filename, content):
@@ -164,6 +199,16 @@ def upload_image_to_onedrive(filename, content):
     r3 = requests.put(url_put, headers={"Authorization": f"Bearer {token}"}, data=content, timeout=120)
     r3.raise_for_status()
 
+# ----- Versiones seguras con reintentos -----
+def safe_download_excel():
+    return _retry(download_excel, "download_excel")
+
+def safe_upload_excel():
+    return _retry(upload_excel, "upload_excel")
+
+def safe_upload_image_to_onedrive(filename, content):
+    return _retry(lambda: upload_image_to_onedrive(filename, content), f"upload_image_to_onedrive({filename})")
+
 # =====================================================================
 # Telegram
 # =====================================================================
@@ -185,7 +230,8 @@ def tg_send_message(chat_id, text):
 # Excel
 # =====================================================================
 def load_df():
-    download_excel()
+    # Usar versión segura (con reintentos) para evitar bloqueos momentáneos
+    safe_download_excel()
     df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
     if "Tarjeta generada" not in df.columns:
         df["Tarjeta generada"] = ""
@@ -215,7 +261,8 @@ def save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=False):
         df.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
         regs.to_excel(w, sheet_name=SHEET_REGISTROS, index=False)
 
-    upload_excel()
+    # Subir Excel con reintentos
+    safe_upload_excel()
 
 # =====================================================================
 # PNG Tarjetas
@@ -265,15 +312,17 @@ def generar_tarjetas_y_enviar():
         png = crear_tarjeta(nombre, codigo)
         tg_send_photo(GROUP_CHAT_ID, png, f"{nombre}\nClase: {clase}")
 
-        upload_image_to_onedrive(f"{nombre.replace(' ','_')}_{codigo}.png", png.getvalue())
+        # Subida de imagen con reintentos
+        safe_upload_image_to_onedrive(f"{nombre.replace(' ','_')}_{codigo}.png", png.getvalue())
 
         df.at[i, "Tarjeta generada"] = time.strftime("%Y-%m-%d %H:%M:%S")
         hechos += 1
 
+    # Guardar DF actualizado y subir Excel con reintentos
     with pd.ExcelWriter(ALUMNOS_XLSX_LOCAL, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
         df.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
 
-    upload_excel()
+    safe_upload_excel()
     return hechos
 
 # =====================================================================
@@ -422,7 +471,7 @@ def debug_flow():
     return jsonify({"has_flow": bool(flow), "keys": list(flow.keys()) if flow else None})
 
 # =====================================================================
-# NUEVO: Página con botón en /generar-tarjetas-ui
+# Página con botón en /generar-tarjetas-ui
 # =====================================================================
 @app.get("/generar-tarjetas-ui")
 def generar_tarjetas_ui():
