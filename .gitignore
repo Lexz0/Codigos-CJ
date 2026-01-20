@@ -1,1 +1,14 @@
+__pycache__/
+*.pyc
 
+# No ignores fuentes TTF
+# (asegúrate de que esta línea NO esté:)
+# *.ttf
+
+# Archivos temporales
+.DS_Store
+
+# Entornos virtuales
+venv/
+.env
+.env.*
