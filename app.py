@@ -66,7 +66,7 @@ SHEET_REGISTROS = "Registros"
 
 # Fuentes (puedes setear por ENV; si no, buscaremos en assets/fonts)
 FONT_TEXT = os.environ.get("FONT_TEXT", "NotoSans-Regular.ttf")
-FONT_CODE39 = os.environ.get("FONT_CODE39", "IDAutomationHC39M.ttf")
+FONT_CODE39 = os.environ.get("FONT_CODE39", "IDAutomationHC39M Free Version.ttf")
 
 CARD_W, CARD_H = 900, 500
 CODE_REGEX = re.compile(r"^[A-Za-z0-9\-\_]{3,64}$")
@@ -313,9 +313,9 @@ def _load_font_safe(path_or_name, size):
     """
     Busca una fuente por:
       1) path/env recibido (FONT_CODE39 o FONT_TEXT)
-      2) assets/fonts/IDAutomationHC39M.ttf
+      2) assets/fonts/IDAutomationHC39M Free Version.ttf
       3) assets/fonts/Free3of9.ttf
-      4) nombres "IDAutomationHC39M.ttf" / "Free3of9.ttf"
+      4) nombres "IDAutomationHC39M Free Version.ttf" / "Free3of9.ttf"
       5) assets/fonts/<path_or_name>
     Si STRICT_BARCODE_FONT=True y no la encuentra → lanza excepción.
     Si STRICT_BARCODE_FONT=False → usa load_default() y registra warning.
@@ -325,11 +325,11 @@ def _load_font_safe(path_or_name, size):
     if p:
         candidates.append(p)
 
-    candidates.append(str(BASE_DIR / "assets" / "fonts" / "IDAutomationHC39M.ttf"))
+    candidates.append(str(BASE_DIR / "assets" / "fonts" / "IDAutomationHC39M Free Version.ttf"))
     candidates.append(str(BASE_DIR / "assets" / "fonts" / "Free3of9.ttf"))
 
     # Intento por nombre (si el SO la tuviera)
-    candidates.append("IDAutomationHC39M.ttf")
+    candidates.append("IDAutomationHC39M Free Version.ttf")
     candidates.append("Free3of9.ttf")
     if p:
         candidates.append(str(BASE_DIR / "assets" / "fonts" / p))
