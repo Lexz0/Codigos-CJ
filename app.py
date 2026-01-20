@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import os, io, time, json, base64, hashlib, re, random
 from urllib.parse import quote, quote as urlquote
@@ -68,13 +67,14 @@ SHEET_REGISTROS = "Registros"
 # Fuentes (puedes setear por ENV; si no, buscaremos en assets/fonts)
 FONT_TEXT = os.environ.get("FONT_TEXT", "NotoSans-Regular.ttf")
 FONT_CODE39 = os.environ.get("FONT_CODE39", "IDAutomationHC39M.ttf")
+
 # Si usas Code 39 estándar, conviene forzar MAYÚSCULAS para garantizar lectura
 CODE39_FORCE_UPPER = os.environ.get("CODE39_FORCE_UPPER", "1") not in ("0", "false", "False")
 
 CARD_W, CARD_H = 900, 500
 
-# Regex "histórico" del dataset (incluye '_'). Si quieres estrictamente Code39 estándar,
-# cámbialo por r'^[0-9A-Z .\-$\/\+%]{1,64}$' y recuerda mayúsculas.
+# Regex "histórico" del dataset (incluye '_').
+# Si quieres estrictamente Code39 estándar, usa: r'^[0-9A-Z .\-$\/\+%]{1,64}$'
 CODE_REGEX = re.compile(r"^[A-Za-z0-9\-\_]{3,64}$")
 
 AZURE_CLIENT_ID = os.environ["AZURE_CLIENT_ID"]
@@ -476,30 +476,50 @@ def generar_tarjetas_y_enviar():
     return hechos
 
 # =====================================================================
-# Webhook Barkoder (con logging y snapshot)
+# Webhook Barkoder (con logging, Base64 y snapshot)
 # =====================================================================
 _last_barkoder = {}
 
+def _maybe_b64_decode(s: str) -> str:
+    s = (s or "").strip()
+    if not s or not re.match(r'^[A-Za-z0-9+/=\s]+$', s):
+        return s
+    try:
+        raw = base64.b64decode(s, validate=False)
+        return raw.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return s
+
 def _extract_codigo_from_data(data_json):
     """
-    Devuelve el string de código a partir de distintos formatos:
-    - dict con 'value' / 'codevalue' / 'text' / 'rawText'
-    - list -> toma el primero que tenga alguno de esos campos
+    Devuelve el string de código desde distintos formatos.
+    Si el item trae {"base64":"true"}, decodifica 'value' (y similares).
     """
+    def from_item(item: dict) -> str:
+        if not isinstance(item, dict):
+            return ""
+        is_b64 = str(item.get("base64", "")).strip().lower() == "true"
+        candidates = [
+            item.get("value"),
+            item.get("codevalue"),
+            item.get("text"),
+            item.get("rawText")
+        ]
+        for c in candidates:
+            if c is None:
+                continue
+            v = str(c)
+            v = _maybe_b64_decode(v) if is_b64 else v.strip()
+            if v:
+                return v
+        return ""
+
     if isinstance(data_json, dict):
-        return (data_json.get("value")
-                or data_json.get("codevalue")
-                or data_json.get("text")
-                or data_json.get("rawText")
-                or "")
+        return from_item(data_json)
+
     if isinstance(data_json, list) and data_json:
-        elem = data_json[0]
-        if isinstance(elem, dict):
-            return (elem.get("value")
-                    or elem.get("codevalue")
-                    or elem.get("text")
-                    or elem.get("rawText")
-                    or "")
+        return from_item(data_json[0])
+
     return ""
 
 @app.post("/barkoder-scan")
@@ -540,7 +560,18 @@ def barkoder_scan():
             _last_barkoder = {"in": body, "out": out}
             return jsonify(out), 200
 
-        # Extrae el código
+        # (Opcional) Decodifica symbology en log
+        try:
+            item0 = data_json[0] if isinstance(data_json, list) and data_json else (data_json if isinstance(data_json, dict) else None)
+            if isinstance(item0, dict):
+                is_b64 = str(item0.get("base64","")).strip().lower() == "true"
+                sym = item0.get("symbology", "")
+                sym = _maybe_b64_decode(str(sym)) if is_b64 else str(sym)
+                app.logger.info(f"[BK] decoded symbology={sym}")
+        except Exception:
+            pass
+
+        # Extrae el código (con posible Base64)
         codigo = _extract_codigo_from_data(data_json)
         if not codigo:
             out = {"status": False, "message": "No se encontró 'value'"}
@@ -563,7 +594,7 @@ def barkoder_scan():
         return jsonify(out), 200
 
 # =====================================================================
-# Procesar códigos
+# Procesar códigos (Telegram primero, luego persistencia)
 # =====================================================================
 def procesar_codigo(codigo):
     if not CODE_REGEX.match(codigo):
@@ -579,17 +610,25 @@ def procesar_codigo(codigo):
     juega = str(fila.iloc[0].get("Juega?","")).strip().lower()
     fecha = time.strftime("%Y-%m-%d")
 
+    # 1) Enviar Telegram primero (feedback inmediato)
     if juega in ("si","sí"):
-        # Garantiza dtype object antes de escribir
+        tg_send_message(GROUP_CHAT_ID, f"✅ {nombre} — {clase} — {fecha}\nPuede ingresar.")
+        admitido = True
+        msg = f"Registrado: {nombre}"
+    else:
+        tg_send_message(GROUP_CHAT_ID, f"⚠️ {nombre} — {clase} — {fecha}\nNO tiene asistencias registradas.")
+        admitido = False
+        msg = "Sin asistencia"
+
+    # 2) Persistencia (no bloquea el feedback)
+    try:
         if "Tarjeta generada" in df.columns and df["Tarjeta generada"].dtype != "object":
             df["Tarjeta generada"] = df["Tarjeta generada"].astype("object")
-        save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=True)
-        tg_send_message(GROUP_CHAT_ID, f"✅ {nombre} — {clase} — {fecha}\nPuede ingresar.")
-        return True, f"Registrado: {nombre}"
-    else:
-        save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=False)
-        tg_send_message(GROUP_CHAT_ID, f"⚠️ {nombre} — {clase} — {fecha}\nNO tiene asistencias registradas.")
-        return False, "Sin asistencia"
+        save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=admitido)
+    except Exception as e:
+        app.logger.warning(f"[BK] Persistencia falló (Excel/Graph): {e}")
+
+    return admitido, msg
 
 # =====================================================================
 # Auth MS Graph
