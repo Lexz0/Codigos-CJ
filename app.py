@@ -68,12 +68,13 @@ SHEET_REGISTROS = "Registros"
 # Fuentes (puedes setear por ENV; si no, buscaremos en assets/fonts)
 FONT_TEXT = os.environ.get("FONT_TEXT", "NotoSans-Regular.ttf")
 FONT_CODE39 = os.environ.get("FONT_CODE39", "IDAutomationHC39M.ttf")
-# Si usas Code 39 estándar, conviene forzar MAYÚSCULAS
+# Si usas Code 39 estándar, conviene forzar MAYÚSCULAS para garantizar lectura
 CODE39_FORCE_UPPER = os.environ.get("CODE39_FORCE_UPPER", "1") not in ("0", "false", "False")
 
 CARD_W, CARD_H = 900, 500
-# Nota: este regex es "histórico" del dataset del curso (incluye '_').
-# Si migras a Code 39 estándar puro, cámbialo por el set oficial.
+
+# Regex "histórico" del dataset (incluye '_'). Si quieres estrictamente Code39 estándar,
+# cámbialo por r'^[0-9A-Z .\-$\/\+%]{1,64}$' y recuerda mayúsculas.
 CODE_REGEX = re.compile(r"^[A-Za-z0-9\-\_]{3,64}$")
 
 AZURE_CLIENT_ID = os.environ["AZURE_CLIENT_ID"]
@@ -118,13 +119,6 @@ def _get_token_or_raise():
 # Reintentos (anti-423/429/409 y 5xx)
 # =====================================================================
 def _retry(fn, desc, max_attempts=5, base_delay=1.5):
-    """
-    Reintenta fn() capturando:
-     - 423 Locked, 429 Throttled, 409 Conflict
-     - 5xx transitorios
-     - errores de red (RequestException)
-    Backoff exponencial con jitter.
-    """
     for attempt in range(1, max_attempts + 1):
         try:
             return fn()
@@ -160,7 +154,6 @@ def _resolve_share(token):
     return r.json()
 
 def get_item_meta(token):
-    """Devuelve metadatos del item compartido (incluye eTag y name)."""
     item = _resolve_share(token)
     item_id = item["id"]
     url = f"{GRAPH_ROOT}/drive/items/{item_id}"
@@ -179,8 +172,6 @@ def download_excel():
         f.write(r.content)
 
 def upload_excel_via_session(token, item_id):
-    """Sube ALUMNOS_XLSX_LOCAL usando upload session (chunk único para archivo pequeño)."""
-    # 1) Crear sesión con replace
     sess_url = f"{GRAPH_ROOT}/drive/items/{item_id}/createUploadSession"
     sess_body = {
         "item": {
@@ -197,7 +188,6 @@ def upload_excel_via_session(token, item_id):
     r.raise_for_status()
     upload_url = r.json()["uploadUrl"]
 
-    # 2) Subir el contenido en un solo bloque
     data = Path(ALUMNOS_XLSX_LOCAL).read_bytes()
     total = len(data)
     headers = {
@@ -209,18 +199,12 @@ def upload_excel_via_session(token, item_id):
     return True
 
 def upload_excel():
-    """
-    Estrategia robusta:
-    A) PUT con If-Match: *
-    B) Si 412 → obtener eTag y PUT con If-Match: "<etag>"
-    C) Si vuelve a fallar → upload session (replace)
-    """
     token = _get_token_or_raise()
     item = _resolve_share(token)
     item_id = item["id"]
     url = f"{GRAPH_ROOT}/drive/items/{item_id}/content"
 
-    # --- A) If-Match: * ---
+    # A) If-Match: *
     try:
         with open(ALUMNOS_XLSX_LOCAL, "rb") as f:
             r = requests.put(
@@ -235,7 +219,7 @@ def upload_excel():
         if getattr(e.response, "status_code", None) != 412:
             raise
 
-    # --- B) Con eTag actual ---
+    # B) If-Match con eTag actual
     try:
         meta = get_item_meta(token)
         etag = meta.get("eTag") or meta.get("@microsoft.graph.etag")
@@ -254,7 +238,7 @@ def upload_excel():
         if getattr(e.response, "status_code", None) != 412:
             raise
 
-    # --- C) Upload session (replace) ---
+    # C) Upload session (replace)
     upload_excel_via_session(token, item_id)
     return True
 
@@ -277,7 +261,7 @@ def upload_image_to_onedrive(filename, content):
     r3 = requests.put(url_put, headers={"Authorization": f"Bearer {token}"}, data=content, timeout=120)
     r3.raise_for_status()
 
-# ----- Versiones "seguras" con reintentos -----
+# ---- Versiones "seguras" con reintentos ----
 def safe_download_excel():
     return _retry(download_excel, "download_excel")
 
@@ -295,12 +279,14 @@ def tg_send_photo(chat_id, png_bytesio, caption=""):
     files = {"photo": ("tarjeta.png", png_bytesio, "image/png")}
     data = {"chat_id": chat_id, "caption": caption}
     r = requests.post(url, data=data, files=files, timeout=30)
+    app.logger.info(f"[TG] sendPhoto status={r.status_code} body={r.text[:300]}")
     r.raise_for_status()
     return r.json()
 
 def tg_send_message(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     r = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=30)
+    app.logger.info(f"[TG] sendMessage status={r.status_code} body={r.text[:300]}")
     r.raise_for_status()
     return r.json()
 
@@ -311,42 +297,29 @@ STRICT_BARCODE_FONT = True  # Si no se encuentra Code39, lanzar error
 
 def _load_font_safe(path_or_name, size):
     """
-    Busca una fuente por:
-    1) path/env recibido (FONT_CODE39 o FONT_TEXT)
-    2) assets/fonts/IDAutomationHC39M.ttf
-    3) assets/fonts/IDAutomationHC39M Free Version.ttf
-    4) assets/fonts/Free3of9.ttf
-    5) assets/fonts/LibreBarcode39-Regular.ttf
-    6) assets/fonts/LibreBarcode39Extended-Regular.ttf
-    7) nombres por sistema (por si existieran)
-    8) assets/fonts/<path_or_name>
-    Si STRICT_BARCODE_FONT=True y no la encuentra → lanza excepción.
+    Busca una fuente por (en este orden):
+    - ENV dado (en assets/fonts y por nombre del sistema)
+    - IDAutomationHC39M.ttf / IDAutomationHC39M Free Version.ttf / Free3of9.ttf
+    - LibreBarcode39-Regular.ttf / LibreBarcode39Extended-Regular.ttf
+    - Por nombre del SO
     """
     candidates = []
     p = str(path_or_name or "").strip()
     if p:
-        # Primero intenta directo en assets/fonts usando el nombre dado por ENV
         candidates.append(str(BASE_DIR / "assets" / "fonts" / p))
-        # También inténtalo como nombre del SO (poco probable en contenedor)
         candidates.append(p)
 
-    # Candidatos "comunes"
     candidates.append(str(BASE_DIR / "assets" / "fonts" / "IDAutomationHC39M.ttf"))
     candidates.append(str(BASE_DIR / "assets" / "fonts" / "IDAutomationHC39M Free Version.ttf"))
     candidates.append(str(BASE_DIR / "assets" / "fonts" / "Free3of9.ttf"))
     candidates.append(str(BASE_DIR / "assets" / "fonts" / "LibreBarcode39-Regular.ttf"))
     candidates.append(str(BASE_DIR / "assets" / "fonts" / "LibreBarcode39Extended-Regular.ttf"))
 
-    # Intento por nombre del SO
     candidates.append("IDAutomationHC39M.ttf")
     candidates.append("IDAutomationHC39M Free Version.ttf")
     candidates.append("Free3of9.ttf")
     candidates.append("LibreBarcode39-Regular.ttf")
     candidates.append("LibreBarcode39Extended-Regular.ttf")
-
-    # Por si el ENV es un path relativo raro
-    if p:
-        candidates.append(str(BASE_DIR / "assets" / "fonts" / p))
 
     # Logging de contexto para depurar en Render
     app.logger.info(f"[FONTS] BASE_DIR={BASE_DIR}")
@@ -364,7 +337,6 @@ def _load_font_safe(path_or_name, size):
     for cand in candidates:
         try:
             font = ImageFont.truetype(cand, size)
-            # Nombre interno de la fuente (cuando está disponible)
             try:
                 fname, fstyle = getattr(font, "getname", lambda: ("?", "?"))()
             except Exception:
@@ -390,24 +362,20 @@ def load_df():
     safe_download_excel()
     df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
 
-    # Asegura la columna "Tarjeta generada"
     if "Tarjeta generada" not in df.columns:
         df["Tarjeta generada"] = ""
 
-    # Evita FutureWarning: que sea tipo object para recibir strings
     if df["Tarjeta generada"].dtype != "object":
         df["Tarjeta generada"] = df["Tarjeta generada"].astype("object")
 
     return df
 
 def save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=False):
-    # Marca de confirmación si aplica
     if conf:
         idx = df.index[df["Código"].astype(str).str.strip() == codigo]
         if len(idx) > 0:
             df.loc[idx, "Conf. Bot"] = "Admitido"
 
-    # Carga/concat del sheet de registros
     try:
         xls = pd.ExcelFile(ALUMNOS_XLSX_LOCAL, engine="openpyxl")
         regs = pd.read_excel(xls, sheet_name=SHEET_REGISTROS, engine="openpyxl")
@@ -422,7 +390,6 @@ def save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=False):
         "fecha": fecha
     }])], ignore_index=True)
 
-    # Guarda ambos sheets
     with pd.ExcelWriter(ALUMNOS_XLSX_LOCAL, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
         df.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
         regs.to_excel(w, sheet_name=SHEET_REGISTROS, index=False)
@@ -437,20 +404,19 @@ def crear_tarjeta(nombre, codigo):
     draw = ImageDraw.Draw(img)
 
     f_name = _load_font_safe(FONT_TEXT, 64)
-    f_bar  = _load_font_safe(FONT_CODE39, 160)  # Fuente Code39 (o Extended)
+    f_bar  = _load_font_safe(FONT_CODE39, 160)
     f_txt  = _load_font_safe(FONT_TEXT, 36)
 
-    # --- Medir título (nombre) usando textbbox ---
+    # Título (nombre)
     bbox_name = draw.textbbox((0, 0), nombre, font=f_name)
     tw = bbox_name[2] - bbox_name[0]
     draw.text(((CARD_W - tw)/2, 40), nombre, fill="black", font=f_name)
 
-    # --- Código de barras ---
+    # Código de barras
     codigo_render = str(codigo).strip()
     if CODE39_FORCE_UPPER:
-        codigo_render = codigo_render.upper()  # Code39 estándar
+        codigo_render = codigo_render.upper()
 
-    # Code 39 requiere *inicio/fin*
     bar = f"*{codigo_render}*"
 
     bbox_bar = draw.textbbox((0, 0), bar, font=f_bar)
@@ -459,7 +425,7 @@ def crear_tarjeta(nombre, codigo):
     y_bar = (CARD_H // 2) - 60
     draw.text(((CARD_W - bw)/2, y_bar), bar, fill="black", font=f_bar)
 
-    # --- Texto del código debajo del “barcode” ---
+    # Texto legible
     bbox_code = draw.textbbox((0, 0), codigo_render, font=f_txt)
     tw2 = bbox_code[2] - bbox_code[0]
     draw.text(((CARD_W - tw2)/2, y_bar + bh + 10), codigo_render, fill="#333333", font=f_txt)
@@ -477,7 +443,6 @@ def generar_tarjetas_y_enviar():
     hechos = 0
     candidatos = 0
 
-    # Asegura dtype de "Tarjeta generada"
     if df["Tarjeta generada"].dtype != "object":
         df["Tarjeta generada"] = df["Tarjeta generada"].astype("object")
 
@@ -486,7 +451,6 @@ def generar_tarjetas_y_enviar():
         if not codigo or not CODE_REGEX.match(codigo):
             continue
 
-        # Solo saltar si 'Tarjeta generada' realmente NO está vacía
         tg_val = row.get("Tarjeta generada", "")
         if not pd.isna(tg_val) and str(tg_val).strip() != "":
             continue
@@ -499,7 +463,6 @@ def generar_tarjetas_y_enviar():
         tg_send_photo(GROUP_CHAT_ID, png, f"{nombre}\nClase: {clase}")
         safe_upload_image_to_onedrive(f"{nombre.replace(' ','_')}_{codigo}.png", png.getvalue())
 
-        # Evita FutureWarning: asegurar object antes de asignar
         if df["Tarjeta generada"].dtype != "object":
             df["Tarjeta generada"] = df["Tarjeta generada"].astype("object")
         df.at[i, "Tarjeta generada"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -513,23 +476,56 @@ def generar_tarjetas_y_enviar():
     return hechos
 
 # =====================================================================
-# Webhook Barkoder
+# Webhook Barkoder (con logging y snapshot)
 # =====================================================================
+_last_barkoder = {}
+
+def _extract_codigo_from_data(data_json):
+    """
+    Devuelve el string de código a partir de distintos formatos:
+    - dict con 'value' / 'codevalue' / 'text' / 'rawText'
+    - list -> toma el primero que tenga alguno de esos campos
+    """
+    if isinstance(data_json, dict):
+        return (data_json.get("value")
+                or data_json.get("codevalue")
+                or data_json.get("text")
+                or data_json.get("rawText")
+                or "")
+    if isinstance(data_json, list) and data_json:
+        elem = data_json[0]
+        if isinstance(elem, dict):
+            return (elem.get("value")
+                    or elem.get("codevalue")
+                    or elem.get("text")
+                    or elem.get("rawText")
+                    or "")
+    return ""
+
 @app.post("/barkoder-scan")
 def barkoder_scan():
+    global _last_barkoder
+    body = {}
     try:
         body = request.get_json(force=True, silent=True) or {}
+        app.logger.info(f"[BK] body_in={body}")
+
         security_data = str(body.get("security_data","")).strip()
         security_hash = str(body.get("security_hash","")).strip()
         data_field = body.get("data")
 
         if not security_data or not security_hash or data_field is None:
-            return jsonify(status=False, message="Parámetros incompletos"), 200
+            out = {"status": False, "message": "Parámetros incompletos"}
+            _last_barkoder = {"in": body, "out": out}
+            return jsonify(out), 200
 
         expected = hashlib.md5((security_data + BARKODER_SECRET).encode("utf-8")).hexdigest()
         if security_hash != expected:
-            return jsonify(status=False, message="Hash inválido"), 200
+            out = {"status": False, "message": "Hash inválido"}
+            _last_barkoder = {"in": body, "out": out}
+            return jsonify(out), 200
 
+        # Decodifica 'data'
         try:
             if isinstance(data_field, str):
                 try:
@@ -540,28 +536,31 @@ def barkoder_scan():
             else:
                 data_json = data_field
         except Exception as e:
-            return jsonify(status=False, message=f"data inválido: {e}"), 200
+            out = {"status": False, "message": f"data inválido: {e}"}
+            _last_barkoder = {"in": body, "out": out}
+            return jsonify(out), 200
 
-        codigo = None
-        if isinstance(data_json, list):
-            if len(data_json) == 0:
-                return jsonify(status=False, message="Lista vacía"), 200
-            elem = data_json[0]
-            if isinstance(elem, dict):
-                codigo = elem.get("value","") or elem.get("codevalue","")
-        elif isinstance(data_json, dict):
-            codigo = data_json.get("value","") or data_json.get("codevalue","")
-
+        # Extrae el código
+        codigo = _extract_codigo_from_data(data_json)
         if not codigo:
-            return jsonify(status=False, message="No se encontró 'value'"), 200
+            out = {"status": False, "message": "No se encontró 'value'"}
+            _last_barkoder = {"in": body, "out": out}
+            return jsonify(out), 200
 
-        codigo = str(codigo).strip()
+        # Limpia posibles asteriscos de start/stop si el lector los incluye:
+        codigo = re.sub(r"^\*|\*$", "", str(codigo)).strip()
+
         ok, msg = procesar_codigo(codigo)
-        return jsonify(status=bool(ok), message=msg), 200
+        app.logger.info(f"[BK] result ok={ok} msg={msg}")
+        out = {"status": bool(ok), "message": msg}
+        _last_barkoder = {"in": body, "out": out}
+        return jsonify(out), 200
 
     except Exception as e:
         app.logger.exception("Error en barkoder-scan")
-        return jsonify(status=False, message=f"Excepción: {e}"), 200
+        out = {"status": False, "message": f"Excepción: {e}"}
+        _last_barkoder = {"in": body, "out": out}
+        return jsonify(out), 200
 
 # =====================================================================
 # Procesar códigos
@@ -655,7 +654,6 @@ def debug_flow():
     flow = redis_get("device_flow")
     return jsonify({"has_flow": bool(flow), "keys": list(flow.keys()) if flow else None})
 
-# Descarga el Excel que REALMENTE está usando el servidor
 @app.get("/_debug/alumnos.xlsx")
 def _debug_excel_download():
     try:
@@ -664,7 +662,6 @@ def _debug_excel_download():
     except Exception as e:
         return jsonify(error=str(e)), 500
 
-# Fuente: ver qué está tomando Pillow realmente
 @app.get("/_debug/fonts")
 def _debug_fonts():
     try:
@@ -678,6 +675,10 @@ def _debug_fonts():
         })
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 500
+
+@app.get("/_debug/last-barkoder")
+def last_barkoder():
+    return jsonify(_last_barkoder or {"note": "no events yet"})
 
 # =====================================================================
 # UI con botón
@@ -711,7 +712,6 @@ def generar_tarjetas_preview():
                 valido = False
                 motivo.append("Código no cumple regex (solo A-Z, a-z, 0-9, '-', '_')")
 
-            # Solo marcar como "ya generada" si NO está vacío/NaN
             if not pd.isna(tg_val) and str(tg_val).strip() != "":
                 valido = False
                 motivo.append("Ya tenía 'Tarjeta generada'")
@@ -756,3 +756,4 @@ def generar_tarjetas():
 # =====================================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT","8080")))
+``
