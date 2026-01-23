@@ -13,6 +13,19 @@ from pathlib import Path
 # =====================================================================
 app = Flask(__name__, template_folder="templates1")
 # Evita cache de navegador/proxies en TODAS las respuestas (UI + JSON)
+
+
+@app.get("/_debug/item-meta")
+def _debug_item_meta():
+    try:
+        token = _get_token_or_raise()
+        meta = get_item_meta(token)  # usa el enlace ONEDRIVE_SHARE_LINK que ya tienes
+        # devolvemos lo esencial para confirmar que es el mismo archivo que editas
+        keep = {k: meta.get(k) for k in ["id","name","size","eTag","webUrl","lastModifiedDateTime"]}
+        return jsonify(ok=True, **keep)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 500
+
 @app.after_request
 def no_cache_all(resp):
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0, private"
