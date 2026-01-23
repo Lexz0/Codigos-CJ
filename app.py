@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import os, io, time, json, base64, hashlib, re, random
 from urllib.parse import quote, quote as urlquote
@@ -15,23 +14,23 @@ from pathlib import Path
 app = Flask(__name__, template_folder="templates1")
 
 # Evita cache de navegador/proxies en TODAS las respuestas (UI + JSON)
+@app.get("/_debug/item-meta")
+def _debug_item_meta():
+    try:
+        token = _get_token_or_raise()
+        meta = get_item_meta(token)  # usa el enlace ONEDRIVE_SHARE_LINK que ya tienes
+        # devolvemos lo esencial para confirmar que es el mismo archivo que editas
+        keep = {k: meta.get(k) for k in ["id","name","size","eTag","webUrl","lastModifiedDateTime"]}
+        return jsonify(ok=True, **keep)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 500
+
 @app.after_request
 def no_cache_all(resp):
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0, private"
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
     return resp
-
-# Debug: metadatos del archivo real que usa el backend
-@app.get("/_debug/item-meta")
-def _debug_item_meta():
-    try:
-        token = _get_token_or_raise()
-        meta = get_item_meta(token)  # usa el enlace ONEDRIVE_SHARE_LINK
-        keep = {k: meta.get(k) for k in ["id","name","size","eTag","webUrl","lastModifiedDateTime"]}
-        return jsonify(ok=True, **keep)
-    except Exception as e:
-        return jsonify(ok=False, error=str(e)), 500
 
 # Base del proyecto (para resolver rutas a /assets/fonts)
 BASE_DIR = Path(__file__).resolve().parent
@@ -82,26 +81,25 @@ ONEDRIVE_SHARE_LINK = os.environ["ONEDRIVE_SHARE_LINK"]
 EVIDENCIAS_FOLDER = "Evidencias CJ"
 ALUMNOS_XLSX_LOCAL = "alumnos.xlsx"
 
-SHEET_ALUMNOS   = "Control Asistencia"
+SHEET_ALUMNOS = "Control Asistencia"
 SHEET_REGISTROS = "Registros"
 
-# >>> NUEVO: hoja de asistencia y TTL para evitar duplicados de Telegram <<<
-SHEET_ASISTENCIA        = "Asistencia"
-ASISTENCIA_TTL_SECONDS  = int(os.environ.get("ASISTENCIA_TTL_SECONDS", "86400"))  # 24h
-
 # Fuentes (puedes setear por ENV; si no, buscaremos en assets/fonts)
-FONT_TEXT   = os.environ.get("FONT_TEXT", "NotoSans-Regular.ttf")
+FONT_TEXT = os.environ.get("FONT_TEXT", "NotoSans-Regular.ttf")
 FONT_CODE39 = os.environ.get("FONT_CODE39", "IDAutomationHC39M.ttf")
 
 CARD_W, CARD_H = 900, 500
-CODE_REGEX = re.compile(r"^[A-Za-z0-9\-\_]{3,64}$")
 
-AZURE_CLIENT_ID  = os.environ["AZURE_CLIENT_ID"]
-AZURE_TENANT     = os.environ.get("AZURE_TENANT", "consumers")
-MSAL_CACHE_PATH  = os.environ.get("MSAL_CACHE_PATH", "msal_cache.json")
-SCOPES           = ["User.Read", "Files.ReadWrite"]
-AUTHORITY        = f"https://login.microsoftonline.com/{AZURE_TENANT}"
-GRAPH_ROOT       = "https://graph.microsoft.com/v1.0"
+# ⚠️ FIX: regex correcta (A-Z, a-z, 0-9, guion y guion_bajo), longitud 3..64
+CODE_REGEX = re.compile(r"^[A-Za-z0-9\-_]{3,64}$")
+
+AZURE_CLIENT_ID = os.environ["AZURE_CLIENT_ID"]
+AZURE_TENANT = os.environ.get("AZURE_TENANT", "consumers")
+MSAL_CACHE_PATH = os.environ.get("MSAL_CACHE_PATH", "msal_cache.json")
+SCOPES = ["User.Read", "Files.ReadWrite"]
+
+AUTHORITY = f"https://login.microsoftonline.com/{AZURE_TENANT}"
+GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
 
 # Clave Redis para eTag del Excel
 REDIS_LAST_ETAG_KEY = "alumnos:last_etag"
@@ -222,7 +220,6 @@ def download_excel():
     }
     r = requests.get(url, headers=headers, timeout=60)
     r.raise_for_status()
-
     with open(ALUMNOS_XLSX_LOCAL, "wb") as f:
         f.write(r.content)
 
@@ -238,7 +235,6 @@ def download_excel_wait_fresh(max_wait_sec=12):
     _, etag_now = _get_current_item_meta_and_etag()
     last = redis_get(REDIS_LAST_ETAG_KEY)
     attempt = 0
-
     while last and etag_now == last and (time.time() - start) < max_wait_sec:
         attempt += 1
         app.logger.info(f"[ETAG] Sin cambios aún (attempt={attempt}). Esperando propagación...")
@@ -246,7 +242,6 @@ def download_excel_wait_fresh(max_wait_sec=12):
         _, etag_now = _get_current_item_meta_and_etag()
 
     download_excel()  # con cache-busting / no-cache
-
     try:
         redis_set(REDIS_LAST_ETAG_KEY, etag_now, ttl_sec=3600)
     except Exception:
@@ -268,11 +263,10 @@ def upload_excel_via_session(token, item_id):
         timeout=30
     )
     r.raise_for_status()
-
     upload_url = r.json()["uploadUrl"]
+
     data = Path(ALUMNOS_XLSX_LOCAL).read_bytes()
     total = len(data)
-
     headers = {
         "Content-Length": str(total),
         "Content-Range": f"bytes 0-{total-1}/{total}"
@@ -302,8 +296,8 @@ def upload_excel():
                 data=f,
                 timeout=120
             )
-            r.raise_for_status()
-            return True
+        r.raise_for_status()
+        return True
     except requests.exceptions.HTTPError as e:
         if getattr(e.response, "status_code", None) != 412:
             raise
@@ -321,8 +315,8 @@ def upload_excel():
                 data=f,
                 timeout=120
             )
-            r.raise_for_status()
-            return True
+        r.raise_for_status()
+        return True
     except requests.exceptions.HTTPError as e:
         if getattr(e.response, "status_code", None) != 412:
             raise
@@ -400,13 +394,17 @@ def _load_font_safe(path_or_name, size):
     p = str(path_or_name or "").strip()
     if p:
         candidates.append(p)
+
     candidates.append(str(BASE_DIR / "assets" / "fonts" / "IDAutomationHC39M.ttf"))
     candidates.append(str(BASE_DIR / "assets" / "fonts" / "Free3of9.ttf"))
+
     # Intento por nombre (si el SO la tuviera)
     candidates.append("IDAutomationHC39M.ttf")
     candidates.append("Free3of9.ttf")
+
     if p:
         candidates.append(str(BASE_DIR / "assets" / "fonts" / p))
+
     last_err = None
     for cand in candidates:
         try:
@@ -416,6 +414,7 @@ def _load_font_safe(path_or_name, size):
         except Exception as e:
             last_err = e
             continue
+
     msg = f"No se encontró fuente válida para '{path_or_name}'. Intentos: {candidates}. Último error: {last_err}"
     if STRICT_BARCODE_FONT:
         app.logger.error(msg)
@@ -425,34 +424,61 @@ def _load_font_safe(path_or_name, size):
         return ImageFont.load_default()
 
 # =====================================================================
-# Excel (carga/guarda)
+# Excel (carga/guarda)  ———  ⚠️ FIX de tipos para "Tarjeta generada"
 # =====================================================================
+def _ensure_required_columns_and_types(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normaliza columnas y dtypes para evitar errores al guardar:
+    - 'Tarjeta generada' tipo string (no float)
+    - 'Conf. Bot' tipo string
+    - Limpieza de 'Código', 'Nombres', 'Apellidos', 'Clase a la que asiste'
+    """
+    # Renombrado/strip de encabezados
+    df.rename(columns=lambda c: str(c).strip(), inplace=True)
+
+    # Asegurar columnas requeridas
+    if "Tarjeta generada" not in df.columns:
+        df["Tarjeta generada"] = pd.Series(pd.NA, dtype="string")
+    if "Conf. Bot" not in df.columns:
+        df["Conf. Bot"] = pd.Series(pd.NA, dtype="string")
+
+    # Tipos seguros
+    df["Tarjeta generada"] = df["Tarjeta generada"].astype("string").fillna("")
+    df["Conf. Bot"] = df["Conf. Bot"].astype("string").fillna("")
+
+    # Evitar que quede 'nan' literal como texto
+    df.loc[df["Tarjeta generada"].str.lower() == "nan", "Tarjeta generada"] = ""
+    df.loc[df["Conf. Bot"].str.lower() == "nan", "Conf. Bot"] = ""
+
+    # Limpieza básica de otras columnas
+    if "Código" in df.columns:
+        df["Código"] = df["Código"].astype(str).str.strip()
+    if "Nombres" in df.columns:
+        df["Nombres"] = df["Nombres"].astype(str).str.strip()
+    if "Apellidos" in df.columns:
+        df["Apellidos"] = df["Apellidos"].astype(str).str.strip()
+    if "Clase a la que asiste" in df.columns:
+        df["Clase a la que asiste"] = df["Clase a la que asiste"].astype(str).str.strip()
+
+    return df
+
 def load_df():
     # Usar la variante con espera a eTag fresco + cache-busting
     safe_download_excel_wait_fresh()
     df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
-
-    if "Tarjeta generada" not in df.columns:
-        df["Tarjeta generada"] = ""
-
-    # Sanitizado mínimo
-    df.rename(columns=lambda c: str(c).strip(), inplace=True)
-    for col in ("Código", "Tarjeta generada", "Nombres", "Apellidos", "Clase a la que asiste"):
-        if col in df.columns:
-            df[col] = df[col].apply(lambda v: str(v).strip() if not pd.isna(v) else v)
-
-    if "Tarjeta generada" in df.columns:
-        df["Tarjeta generada"] = df["Tarjeta generada"].apply(
-            lambda v: "" if (isinstance(v, str) and v.lower() == "nan") else v
-        )
+    df = _ensure_required_columns_and_types(df)
     return df
 
 def save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=False):
+    # Asegurar tipos seguros ANTES de guardar
+    df = _ensure_required_columns_and_types(df)
+
     if conf:
         idx = df.index[df["Código"].astype(str).str.strip() == codigo]
         if len(idx) > 0:
             df.loc[idx, "Conf. Bot"] = "Admitido"
 
+    # Cargar/crear hoja de registros
     try:
         xls = pd.ExcelFile(ALUMNOS_XLSX_LOCAL, engine="openpyxl")
         regs = pd.read_excel(xls, sheet_name=SHEET_REGISTROS, engine="openpyxl")
@@ -467,51 +493,11 @@ def save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=False):
         "fecha": fecha
     }])], ignore_index=True)
 
+    # Guardar ambas hojas
     with pd.ExcelWriter(ALUMNOS_XLSX_LOCAL, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
         df.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
         regs.to_excel(w, sheet_name=SHEET_REGISTROS, index=False)
 
-    safe_upload_excel()
-
-# === Nueva hoja: Asistencia (append) ===
-def append_asistencia(nombre, apellidos, codigo):
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    # Cargar hojas existentes
-    try:
-        xls = pd.ExcelFile(ALUMNOS_XLSX_LOCAL, engine="openpyxl")
-        try:
-            df_as = pd.read_excel(xls, sheet_name=SHEET_ASISTENCIA, engine="openpyxl")
-        except Exception:
-            df_as = pd.DataFrame(columns=["timestamp","codigo","nombre","apellidos"])
-        try:
-            df_al = pd.read_excel(xls, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
-        except Exception:
-            df_al = pd.DataFrame()
-        try:
-            regs = pd.read_excel(xls, sheet_name=SHEET_REGISTROS, engine="openpyxl")
-        except Exception:
-            regs = pd.DataFrame(columns=["timestamp","codigo","nombre","clase","fecha"])
-    except Exception:
-        # Fallback si no existe el archivo local aún
-        df_as = pd.DataFrame(columns=["timestamp","codigo","nombre","apellidos"])
-        df_al = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
-        try:
-            regs = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_REGISTROS, engine="openpyxl")
-        except Exception:
-            regs = pd.DataFrame(columns=["timestamp","codigo","nombre","clase","fecha"])
-
-    # Agregar nueva fila de asistencia
-    new_row = {"timestamp": ts, "codigo": codigo, "nombre": nombre, "apellidos": apellidos}
-    df_as = pd.concat([df_as, pd.DataFrame([new_row])], ignore_index=True)
-
-    # Escribir todas las hojas
-    with pd.ExcelWriter(ALUMNOS_XLSX_LOCAL, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
-        if not df_al.empty:
-            df_al.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
-        regs.to_excel(w, sheet_name=SHEET_REGISTROS, index=False)
-        df_as.to_excel(w, sheet_name=SHEET_ASISTENCIA, index=False)
-
-    # Subir a OneDrive
     safe_upload_excel()
 
 # =====================================================================
@@ -525,12 +511,12 @@ def crear_tarjeta(nombre, codigo):
     f_bar  = _load_font_safe(FONT_CODE39, 160)  # Fuente Code39
     f_txt  = _load_font_safe(FONT_TEXT, 36)
 
-    # Título (nombre)
+    # -- Medir título (nombre) usando textbbox --
     bbox_name = draw.textbbox((0, 0), nombre, font=f_name)
     tw = bbox_name[2] - bbox_name[0]
     draw.text(((CARD_W - tw)/2, 40), nombre, fill="black", font=f_name)
 
-    # Código de barras (Code39 requiere *CODE*)
+    # -- Código de barras (Code39 requiere *CODE*) --
     bar = f"*{codigo}*"
     bbox_bar = draw.textbbox((0, 0), bar, font=f_bar)
     bw = bbox_bar[2] - bbox_bar[0]
@@ -538,7 +524,7 @@ def crear_tarjeta(nombre, codigo):
     y_bar = (CARD_H // 2) - 60
     draw.text(((CARD_W - bw)/2, y_bar), bar, fill="black", font=f_bar)
 
-    # Texto del código debajo del código de barras
+    # -- Texto del código debajo del “barcode” --
     bbox_code = draw.textbbox((0, 0), codigo, font=f_txt)
     tw2 = bbox_code[2] - bbox_code[0]
     draw.text(((CARD_W - tw2)/2, y_bar + bh + 10), codigo, fill="#333333", font=f_txt)
@@ -549,38 +535,50 @@ def crear_tarjeta(nombre, codigo):
     return buf
 
 # =====================================================================
-# Generar tarjetas (batch)
+# Generar tarjetas (batch)  ———  ⚠️ FIX: escribir Excel una sola vez y con dtype string
 # =====================================================================
 def generar_tarjetas_y_enviar():
     df = load_df()
+
     hechos = 0
     candidatos = 0
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
 
+    # Recolectar índices de candidatos primero
+    candidate_indices = []
     for i, row in df.iterrows():
         codigo = str(row.get("Código", "")).strip()
         if not codigo or not CODE_REGEX.match(codigo):
             continue
-
-        # Saltar si "Tarjeta generada" NO está vacía/NaN
         tg_val = row.get("Tarjeta generada", "")
         if not pd.isna(tg_val) and str(tg_val).strip() != "":
             continue
+        candidate_indices.append(i)
 
-        candidatos += 1
+    # Procesar candidatos
+    for i in candidate_indices:
+        row = df.loc[i]
+        codigo = str(row.get("Código", "")).strip()
         nombre = f"{row.get('Nombres','')} {row.get('Apellidos','')}".strip()
         clase  = str(row.get("Clase a la que asiste","")).strip()
 
+        # Generar y enviar
         png = crear_tarjeta(nombre, codigo)
         tg_send_photo(GROUP_CHAT_ID, png, f"{nombre}\nClase: {clase}")
         safe_upload_image_to_onedrive(f"{nombre.replace(' ','_')}_{codigo}.png", png.getvalue())
 
-        df.at[i, "Tarjeta generada"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        # Marcar en DF con fecha/hora legible (string)
+        df.at[i, "Tarjeta generada"] = now_str
         hechos += 1
+        candidatos += 1
 
-    with pd.ExcelWriter(ALUMNOS_XLSX_LOCAL, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
-        df.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
+    # Guardar una sola vez (más robusto) si hubo cambios
+    if hechos > 0:
+        df = _ensure_required_columns_and_types(df)
+        with pd.ExcelWriter(ALUMNOS_XLSX_LOCAL, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
+            df.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
+        safe_upload_excel()
 
-    safe_upload_excel()
     app.logger.info(f"[GEN] candidatos={candidatos} hechos={hechos}")
     return hechos
 
@@ -593,7 +591,7 @@ def barkoder_scan():
         body = request.get_json(force=True, silent=True) or {}
         security_data = str(body.get("security_data","")).strip()
         security_hash = str(body.get("security_hash","")).strip()
-        data_field    = body.get("data")
+        data_field = body.get("data")
 
         if not security_data or not security_hash or data_field is None:
             return jsonify(status=False, message="Parámetros incompletos"), 200
@@ -605,7 +603,7 @@ def barkoder_scan():
         try:
             if isinstance(data_field, str):
                 try:
-                    decoded   = base64.b64decode(data_field)
+                    decoded = base64.b64decode(data_field)
                     data_json = json.loads(decoded.decode("utf-8"))
                 except Exception:
                     data_json = json.loads(data_field)
@@ -636,7 +634,7 @@ def barkoder_scan():
         return jsonify(status=False, message=f"Excepción: {e}"), 200
 
 # =====================================================================
-# Procesar códigos  (con antiduplicado + asistencia)
+# Procesar códigos
 # =====================================================================
 def procesar_codigo(codigo):
     if not CODE_REGEX.match(codigo):
@@ -647,35 +645,18 @@ def procesar_codigo(codigo):
     if fila.empty:
         return False, "Código no encontrado"
 
-    nombres   = str(fila.iloc[0].get('Nombres','')).strip()
-    apellidos = str(fila.iloc[0].get('Apellidos','')).strip()
-    nombre    = f"{nombres} {apellidos}".strip()
-    clase     = str(fila.iloc[0].get("Clase a la que asiste","")).strip()
-    juega     = str(fila.iloc[0].get("Juega?","")).strip().lower()
-    fecha     = time.strftime("%Y-%m-%d")
-
-    # Evitar mensajes duplicados en Telegram por código y día
-    day_key   = time.strftime("%Y-%m-%d")
-    redis_key = f"asistencia:last_msg:{codigo}:{day_key}"
-    already   = redis_get(redis_key)
-    send_msg  = not bool(already)
-    if send_msg:
-        try:
-            redis_set(redis_key, True, ttl_sec=ASISTENCIA_TTL_SECONDS)
-        except Exception:
-            pass
+    nombre = f"{fila.iloc[0].get('Nombres','')} {fila.iloc[0].get('Apellidos','')}".strip()
+    clase = str(fila.iloc[0].get("Clase a la que asiste","")).strip()
+    juega = str(fila.iloc[0].get("Juega?","")).strip().lower()
+    fecha = time.strftime("%Y-%m-%d")
 
     if juega in ("si","sí"):
         save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=True)
-        if send_msg:
-            tg_send_message(GROUP_CHAT_ID, f"✅ {nombre} — {clase} — {fecha}\nPuede ingresar.")
-        append_asistencia(nombres, apellidos, codigo)
+        tg_send_message(GROUP_CHAT_ID, f"✅ {nombre} — {clase} — {fecha}\nPuede ingresar.")
         return True, f"Registrado: {nombre}"
     else:
         save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=False)
-        if send_msg:
-            tg_send_message(GROUP_CHAT_ID, f"⚠️ {nombre} — {clase} — {fecha}\nNO tiene asistencias registradas.")
-        append_asistencia(nombres, apellidos, codigo)
+        tg_send_message(GROUP_CHAT_ID, f"⚠️ {nombre} — {clase} — {fecha}\nNO tiene asistencias registradas.")
         return False, "Sin asistencia"
 
 # =====================================================================
@@ -691,6 +672,7 @@ def init_auth():
         flow = client.initiate_device_flow(scopes=SCOPES)
         if "user_code" not in flow:
             return jsonify(error="No se pudo crear device flow"), 500
+
         ttl = int(flow.get("expires_in", 900))
         redis_set("device_flow", flow, ttl_sec=ttl)
         return jsonify({
@@ -714,7 +696,6 @@ def finish_auth():
             AZURE_CLIENT_ID, authority=AUTHORITY, token_cache=cache
         )
         result = client.acquire_token_by_device_flow(flow)
-
         if "access_token" in result:
             _save_cache(cache)
             redis_del("device_flow")
@@ -741,23 +722,22 @@ def debug_flow():
     flow = redis_get("device_flow")
     return jsonify({"has_flow": bool(flow), "keys": list(flow.keys()) if flow else None})
 
-# Descarga el Excel fresco que usa el servidor
+# Descarga el Excel que REALMENTE está usando el servidor (fresco)
 @app.get("/_debug/alumnos.xlsx")
 def _debug_excel_download():
     try:
         safe_download_excel_wait_fresh()  # baja lo último
-        # Nombre único evita TODA caché externa
+        # 🔥 Nombre único evita TODA caché externa
         unique_name = f"alumnos_{int(time.time()*1000)}.xlsx"
-
         resp = send_file(
             ALUMNOS_XLSX_LOCAL,
             as_attachment=True,
-            download_name=unique_name
+            download_name=unique_name  # <--- ESTE ES EL FIX REAL
         )
-        resp.headers["Cache-Control"]   = "no-cache, no-store, must-revalidate, max-age=0"
-        resp.headers["Pragma"]          = "no-cache"
-        resp.headers["Expires"]         = "0"
-        resp.headers["Surrogate-Control"]= "no-store"
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        resp.headers["Surrogate-Control"] = "no-store"
         return resp
     except Exception as e:
         return jsonify(error=str(e)), 500
@@ -782,23 +762,26 @@ def generar_tarjetas_preview():
         for _, row in df.iterrows():
             codigo_raw = str(row.get("Código", "")).strip()
             nombre = f"{str(row.get('Nombres','')).strip()} {str(row.get('Apellidos','')).strip()}".strip()
-            clase  = str(row.get("Clase a la que asiste","")).strip()
+            clase = str(row.get("Clase a la que asiste","")).strip()
             tg_val = row.get("Tarjeta generada", "")
 
             motivo = []
             valido = True
             if not codigo_raw:
-                valido = False; motivo.append("Sin código")
+                valido = False
+                motivo.append("Sin código")
             elif not CODE_REGEX.match(codigo_raw):
-                valido = False; motivo.append("Código no cumple regex (solo A-Z, a-z, 0-9, '-', '_')")
+                valido = False
+                motivo.append("Código no cumple regex (solo A-Z, a-z, 0-9, '-', '_')")
 
             # Solo marcar como "ya generada" si NO está vacío/NaN
             if not pd.isna(tg_val) and str(tg_val).strip() != "":
-                valido = False; motivo.append("Ya tenía 'Tarjeta generada'")
+                valido = False
+                motivo.append("Ya tenía 'Tarjeta generada'")
 
             resultados.append({
                 "nombre": nombre or "—",
-                "clase":  clase  or "—",
+                "clase": clase or "—",
                 "codigo": codigo_raw or "—",
                 "seria_generado": bool(valido),
                 "motivo_si_no": ", ".join(motivo) if motivo else "OK"
@@ -829,8 +812,8 @@ def force_refresh():
 
         # Re-descargar esperando versión fresca
         safe_download_excel_wait_fresh()
-
         df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
+        df = _ensure_required_columns_and_types(df)
 
         def is_candidate(row):
             codigo = str(row.get("Código", "")).strip()
@@ -872,6 +855,7 @@ def purge_cache():
 
         # 4) Recontar candidatos
         df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
+        df = _ensure_required_columns_and_types(df)
 
         def is_candidate(row):
             codigo = str(row.get("Código", "")).strip()
