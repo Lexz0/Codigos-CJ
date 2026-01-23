@@ -79,6 +79,9 @@ SCOPES = ["User.Read", "Files.ReadWrite"]
 AUTHORITY = f"https://login.microsoftonline.com/{AZURE_TENANT}"
 GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
 
+# Clave Redis para eTag del Excel
+REDIS_LAST_ETAG_KEY = "alumnos:last_etag"
+
 # =====================================================================
 # MSAL (auth)
 # =====================================================================
@@ -165,27 +168,69 @@ def get_item_meta(token):
     r.raise_for_status()
     return r.json()
 
+def _get_current_item_meta_and_etag():
+    token = _get_token_or_raise()
+    meta = get_item_meta(token)
+    etag = meta.get("eTag") or meta.get("@microsoft.graph.etag")
+    return meta, etag
+
 def download_excel():
+    """Descarga el Excel con cache-busting, headers no-cache y elimina la copia local previa."""
     token = _get_token_or_raise()
     item = _resolve_share(token)
     item_id = item["id"]
-    url = f"{GRAPH_ROOT}/drive/items/{item_id}/content"
 
-    # NUEVO: elimina el archivo local si existe para evitar usar una copia vieja
+    # Cache-busting: query param único por descarga
+    ts = int(time.time() * 1000)
+    url = f"{GRAPH_ROOT}/drive/items/{item_id}/content?cb={ts}"
+
+    # Borrar copia local previa
     try:
         if os.path.exists(ALUMNOS_XLSX_LOCAL):
             os.remove(ALUMNOS_XLSX_LOCAL)
     except Exception:
         pass
 
-    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+    # Headers anti-caché
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        "Pragma": "no-cache",
+    }
+
+    r = requests.get(url, headers=headers, timeout=60)
     r.raise_for_status()
     with open(ALUMNOS_XLSX_LOCAL, "wb") as f:
         f.write(r.content)
 
+def download_excel_wait_fresh(max_wait_sec=12):
+    """
+    Intenta obtener una versión 'fresca' por eTag:
+    - Lee eTag actual (A) y último eTag visto (Redis).
+    - Si son iguales y max_wait_sec > 0, espera y reintenta (cada 2s).
+    - Luego descarga con cache-busting.
+    - Guarda el eTag actual en Redis (TTL 1h).
+    """
+    start = time.time()
+    _, etag_now = _get_current_item_meta_and_etag()
+    last = redis_get(REDIS_LAST_ETAG_KEY)
+    attempt = 0
+
+    while last and etag_now == last and (time.time() - start) < max_wait_sec:
+        attempt += 1
+        app.logger.info(f"[ETAG] Sin cambios aún (attempt={attempt}). Esperando propagación...")
+        time.sleep(2)
+        _, etag_now = _get_current_item_meta_and_etag()
+
+    download_excel()  # con cache-busting / no-cache
+
+    try:
+        redis_set(REDIS_LAST_ETAG_KEY, etag_now, ttl_sec=3600)
+    except Exception:
+        pass
+
 def upload_excel_via_session(token, item_id):
     """Sube ALUMNOS_XLSX_LOCAL usando upload session (chunk único para archivo pequeño)."""
-    # 1) Crear sesión con replace
     sess_url = f"{GRAPH_ROOT}/drive/items/{item_id}/createUploadSession"
     sess_body = {
         "item": {
@@ -202,7 +247,6 @@ def upload_excel_via_session(token, item_id):
     r.raise_for_status()
     upload_url = r.json()["uploadUrl"]
 
-    # 2) Subir el contenido en un solo bloque
     data = Path(ALUMNOS_XLSX_LOCAL).read_bytes()
     total = len(data)
     headers = {
@@ -261,7 +305,7 @@ def upload_excel():
             raise
 
     # --- C) Upload session (replace) ---
-    upload_excel_via_session(token, item_id)
+    upload_excel_via_session(token, item["id"])
     return True
 
 def upload_image_to_onedrive(filename, content):
@@ -288,6 +332,9 @@ def upload_image_to_onedrive(filename, content):
 # ----- Versiones "seguras" con reintentos -----
 def safe_download_excel():
     return _retry(download_excel, "download_excel")
+
+def safe_download_excel_wait_fresh():
+    return _retry(lambda: download_excel_wait_fresh(max_wait_sec=12), "download_excel_wait_fresh")
 
 def safe_upload_excel():
     return _retry(upload_excel, "upload_excel")
@@ -364,7 +411,8 @@ def _load_font_safe(path_or_name, size):
 # Excel (carga/guarda)
 # =====================================================================
 def load_df():
-    safe_download_excel()
+    # Usar la variante con espera a eTag fresco + cache-busting
+    safe_download_excel_wait_fresh()
     df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
     if "Tarjeta generada" not in df.columns:
         df["Tarjeta generada"] = ""
@@ -443,7 +491,7 @@ def generar_tarjetas_y_enviar():
         if not codigo or not CODE_REGEX.match(codigo):
             continue
 
-        # Solo saltar si 'Tarjeta generada' realmente NO está vacía
+        # Solo saltar si 'Tarjeta generada' realmente NO está vacía (ni NaN)
         tg_val = row.get("Tarjeta generada", "")
         if not pd.isna(tg_val) and str(tg_val).strip() != "":
             continue
@@ -617,7 +665,7 @@ def debug_flow():
 @app.get("/_debug/alumnos.xlsx")
 def _debug_excel_download():
     try:
-        safe_download_excel()  # baja la última versión desde OneDrive
+        safe_download_excel_wait_fresh()  # baja la última versión desde OneDrive
         return send_file(ALUMNOS_XLSX_LOCAL, as_attachment=True)
     except Exception as e:
         return jsonify(error=str(e)), 500
@@ -677,6 +725,37 @@ def generar_tarjetas_preview():
     except Exception as e:
         app.logger.exception("preview error")
         return jsonify(error=str(e)), 500
+
+# =====================================================================
+# Forzar refresco (borrar local + esperar eTag fresco + recontar)
+# =====================================================================
+@app.post("/force-refresh")
+def force_refresh():
+    try:
+        try:
+            if os.path.exists(ALUMNOS_XLSX_LOCAL):
+                os.remove(ALUMNOS_XLSX_LOCAL)
+        except Exception:
+            pass
+
+        safe_download_excel_wait_fresh()  # garantiza versión fresca
+        df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
+
+        def is_candidate(row):
+            codigo = str(row.get("Código", "")).strip()
+            tg_val = row.get("Tarjeta generada", "")
+            if not codigo or not CODE_REGEX.match(codigo):
+                return False
+            if not pd.isna(tg_val) and str(tg_val).strip() != "":
+                return False
+            return True
+
+        candidatos = int(df.apply(is_candidate, axis=1).sum())
+        total = int(len(df))
+        return jsonify(ok=True, total_filas=total, candidatos=candidatos)
+    except Exception as e:
+        app.logger.exception("force-refresh error")
+        return jsonify(ok=False, error=str(e)), 500
 
 # =====================================================================
 # GET + POST para generar tarjetas
