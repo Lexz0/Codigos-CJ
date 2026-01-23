@@ -580,21 +580,31 @@ def debug_flow():
     flow = redis_get("device_flow")
     return jsonify({"has_flow": bool(flow), "keys": list(flow.keys()) if flow else None})
 # Descarga el Excel que REALMENTE está usando el servidor (fresco)
+
 @app.get("/_debug/alumnos.xlsx")
 def _debug_excel_download():
     try:
-        safe_download_excel_wait_fresh()  # baja la última versión desde OneDrive
+        safe_download_excel_wait_fresh()  # baja lo último
 
-        # --- FIX: respuestas de archivo con headers anti-caché explícitos ---
-        resp = send_file(ALUMNOS_XLSX_LOCAL, as_attachment=True)
+        # 🔥 Nombre único evita TODA caché externa
+        unique_name = f"alumnos_{int(time.time()*1000)}.xlsx"
+
+        resp = send_file(
+            ALUMNOS_XLSX_LOCAL,
+            as_attachment=True,
+            download_name=unique_name  # <--- ESTE ES EL FIX REAL
+        )
+
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
         resp.headers["Surrogate-Control"] = "no-store"
+
         return resp
 
     except Exception as e:
         return jsonify(error=str(e)), 500
+
 # =====================================================================
 # UI con botón
 # =====================================================================
