@@ -13,6 +13,14 @@ from pathlib import Path
 # =====================================================================
 app = Flask(__name__, template_folder="templates1")
 
+# Evita cache de navegador/proxies en TODAS las respuestas (UI + JSON)
+@app.after_request
+def no_cache_all(resp):
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0, private"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
 # Base del proyecto (para resolver rutas a /assets/fonts)
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -416,6 +424,16 @@ def load_df():
     df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
     if "Tarjeta generada" not in df.columns:
         df["Tarjeta generada"] = ""
+
+    # --- Sanitizado mínimo ---
+    df.rename(columns=lambda c: str(c).strip(), inplace=True)
+    for col in ("Código", "Tarjeta generada", "Nombres", "Apellidos", "Clase a la que asiste"):
+        if col in df.columns:
+            df[col] = df[col].apply(lambda v: str(v).strip() if not pd.isna(v) else v)
+    if "Tarjeta generada" in df.columns:
+        df["Tarjeta generada"] = df["Tarjeta generada"].apply(
+            lambda v: "" if (isinstance(v, str) and v.lower() == "nan") else v
+        )
     return df
 
 def save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=False):
@@ -661,7 +679,7 @@ def debug_flow():
     flow = redis_get("device_flow")
     return jsonify({"has_flow": bool(flow), "keys": list(flow.keys()) if flow else None})
 
-# Descarga el Excel que REALMENTE está usando el servidor
+# Descarga el Excel que REALMENTE está usando el servidor (fresco)
 @app.get("/_debug/alumnos.xlsx")
 def _debug_excel_download():
     try:
@@ -732,13 +750,15 @@ def generar_tarjetas_preview():
 @app.post("/force-refresh")
 def force_refresh():
     try:
+        # Borrar archivo local
         try:
             if os.path.exists(ALUMNOS_XLSX_LOCAL):
                 os.remove(ALUMNOS_XLSX_LOCAL)
         except Exception:
             pass
 
-        safe_download_excel_wait_fresh()  # garantiza versión fresca
+        # Re-descargar esperando versión fresca
+        safe_download_excel_wait_fresh()
         df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
 
         def is_candidate(row):
@@ -755,6 +775,47 @@ def force_refresh():
         return jsonify(ok=True, total_filas=total, candidatos=candidatos)
     except Exception as e:
         app.logger.exception("force-refresh error")
+        return jsonify(ok=False, error=str(e)), 500
+
+# =====================================================================
+# PURGE: borra cache local + eTag en Redis y recontar
+# =====================================================================
+@app.post("/purge-cache")
+def purge_cache():
+    try:
+        # 1) Borrar archivo local
+        try:
+            if os.path.exists(ALUMNOS_XLSX_LOCAL):
+                os.remove(ALUMNOS_XLSX_LOCAL)
+        except Exception:
+            pass
+
+        # 2) Borrar eTag previo en Redis
+        try:
+            redis_del(REDIS_LAST_ETAG_KEY)
+        except Exception:
+            pass
+
+        # 3) Descargar esperando eTag "fresco"
+        safe_download_excel_wait_fresh()
+
+        # 4) Recontar candidatos
+        df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
+
+        def is_candidate(row):
+            codigo = str(row.get("Código", "")).strip()
+            tg_val = row.get("Tarjeta generada", "")
+            if not codigo or not CODE_REGEX.match(codigo):
+                return False
+            if not pd.isna(tg_val) and str(tg_val).strip() != "":
+                return False
+            return True
+
+        candidatos = int(df.apply(is_candidate, axis=1).sum())
+        total = int(len(df))
+        return jsonify(ok=True, total_filas=total, candidatos=candidatos)
+    except Exception as e:
+        app.logger.exception("purge-cache error")
         return jsonify(ok=False, error=str(e)), 500
 
 # =====================================================================
