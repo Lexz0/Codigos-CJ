@@ -83,5 +83,75 @@
             loader.style.display = "none";
         };
     </script>
+
+    
+<!-- Dentro del <body> de generar_tarjetas.html -->
+<h1>Generar Tarjetas</h1>
+<p>
+  <button id="btnRecontar">🔄 Recontar pendientes</button>
+  <button id="btnGenerar">🚀 Generar Tarjetas</button>
+</p>
+
+<div id="loader" style="display:none;margin:8px 0;">Cargando...</div>
+<div id="resumen" style="margin-top:10px;font-weight:bold;"></div>
+<pre id="detalle" style="white-space:pre-wrap;"></pre>
+
+<script>
+  async function recontar() {
+    const loader = document.getElementById("loader");
+    const resumen = document.getElementById("resumen");
+    const detalle = document.getElementById("detalle");
+    resumen.textContent = "";
+    detalle.textContent = "";
+    loader.style.display = "block";
+    try {
+      const resp = await fetch("/generar-tarjetas-preview");
+      const data = await resp.json();
+      if (data.error) {
+        resumen.textContent = "Error: " + data.error;
+      } else {
+        resumen.textContent = `Pendientes a generar: ${data.candidatos_a_generar} (de ${data.total_filas} filas)`;
+        // Si quieres ver el detalle de los primeros 10 únicamente:
+        const primeros = (data.preview || []).filter(p => p.seria_generado).slice(0, 10);
+        if (primeros.length > 0) {
+          detalle.textContent = "Primeros candidatos:\n" + primeros.map(p =>
+             `- ${p.codigo} | ${p.nombre} | ${p.clase}`).join("\n");
+        } else {
+          detalle.textContent = "";
+        }
+      }
+    } catch (e) {
+      resumen.textContent = "Error de red: " + e;
+    } finally {
+      loader.style.display = "none";
+    }
+  }
+
+  document.getElementById("btnRecontar").onclick = recontar;
+
+  document.getElementById("btnGenerar").onclick = async () => {
+    const loader = document.getElementById("loader");
+    const resumen = document.getElementById("resumen");
+    const detalle = document.getElementById("detalle");
+    loader.style.display = "block";
+    resumen.textContent = "Generando, por favor espera...";
+    detalle.textContent = "";
+    try {
+      const resp = await fetch("/generar-tarjetas", { method: "POST" });
+      const data = await resp.json();
+      resumen.textContent = JSON.stringify(data, null, 2);
+      // Recontar automáticamente después de generar
+      await recontar();
+    } catch (e) {
+      resumen.textContent = "Error: " + e;
+    } finally {
+      loader.style.display = "none";
+    }
+  };
+
+  // Recontar al cargar la página
+  recontar();
+</script>
+
 </body>
 </html>
