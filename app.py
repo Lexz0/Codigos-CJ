@@ -629,21 +629,14 @@ def _best_effort_parse_body():
 # =====================================================================
 # Webhook Barkoder
 # =====================================================================
+
 @app.post("/barkoder-scan")
 def barkoder_scan():
     try:
-        # Parseo tolerante del cuerpo
-        body, prev_preview = _best_effort_parse_body()
+        # Parseo tolerante del cuerpo (JSON, form, o raw)
+        body, _ = _best_effort_parse_body()
 
-        # Traza temprana (para ver qué llega)
-        try:
-            ua = request.headers.get("User-Agent","")
-            p = prev_preview or _json_preview(body)
-            tg_send_message(GROUP_CHAT_ID, f"📥 /barkoder-scan recibido\nUA:{ua}\nBody:{p}")
-        except Exception:
-            pass
-
-        # Acepta security_data/securityData y security_hash/securityHash
+        # Acepta security_data/securityData y security_hash/securityHash (camelCase, etc.)
         security_data = str(
             body.get("security_data")
             or body.get("securityData")
@@ -658,9 +651,60 @@ def barkoder_scan():
         ).strip()
 
         if not security_data or not security_hash:
-            try: tg_send_message(GROUP_CHAT_ID, "⚠️ Barkoder: faltan security_data/security_hash.")
-            except Exception: pass
+            # No avisamos a Telegram; solo respondemos al cliente
             return jsonify(status=False, message="Parámetros incompletos"), 200
+
+        # Verificación tolerante del hash: md5(security_data + secret)
+        sec_raw  = BARKODER_SECRET
+        sec_trim = (BARKODER_SECRET or "").strip()
+        sdata    = str(security_data)
+        expected_a = hashlib.md5((sdata + sec_raw ).encode("utf-8")).hexdigest()
+        expected_b = hashlib.md5((sdata + sec_trim).encode("utf-8")).hexdigest()
+        if security_hash not in (expected_a, expected_b):
+            # No avisamos a Telegram; solo respondemos al cliente
+            return jsonify(status=False, message="Hash inválido"), 200
+
+        # data: JSON o Base64(JSON) o JSON en otros campos. Si no, usa el body completo.
+        data_field = (
+            body.get("data")
+            or body.get("payload")
+            or body.get("value")
+            or body.get("result")
+            or body
+        )
+        try:
+            if isinstance(data_field, (dict, list)):
+                data_json = data_field
+            elif isinstance(data_field, str):
+                # 1) Intentar Base64 -> JSON
+                try:
+                    data_json = json.loads(base64.b64decode(data_field).decode("utf-8"))
+                except Exception:
+                    # 2) Intentar JSON directo
+                    data_json = json.loads(data_field)
+            else:
+                data_json = {}
+        except Exception as e:
+            # No avisamos a Telegram; solo respondemos al cliente
+            return jsonify(status=False, message=f"data inválido: {e}"), 200
+
+        # Extraer código y normalizar a dígitos si existen
+        codigo_raw = _extract_codigo_robusto(data_json)
+        if not codigo_raw:
+            return jsonify(status=False, message="No se encontró código en data"), 200
+
+        codigo = _normalize_codigo_digits_first(str(codigo_raw))
+
+        # Procesar (esto es lo que ENVÍA el VEREDICTO a Telegram)
+        ok, msg = procesar_codigo(str(codigo).strip())
+
+        # Respuesta HTTP al llamador
+        return jsonify(status=bool(ok), message=msg), 200
+
+    except Exception as e:
+        # Sin mensajes “recibido”; solo devolvemos el error al cliente
+        app.logger.exception("Error en barkoder-scan")
+        return jsonify(status=False, message=f"Excepción: {e}"), 200
 
         # --- Verificación tolerante del hash ---
         # md5(security_data + secret_word) tolerando espacios accidentales
