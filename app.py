@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import os, io, time, json, base64, hashlib, re, random, unicodedata
 from urllib.parse import quote, quote as urlquote
@@ -84,8 +83,8 @@ SHEET_REGISTROS = "Registros"
 
 FONT_TEXT = os.environ.get("FONT_TEXT", "NotoSans-Regular.ttf")
 FONT_CODE39 = os.environ.get("FONT_CODE39", "IDAutomationHC39M.ttf")
-CARD_W, CARD_H = 900, 500
 
+CARD_W, CARD_H = 900, 500
 CODE_REGEX = re.compile(r"^[0-9]{1,64}$")
 
 AZURE_CLIENT_ID = os.environ["AZURE_CLIENT_ID"]
@@ -256,8 +255,8 @@ def upload_excel():
                 data=f,
                 timeout=120
             )
-        r.raise_for_status()
-        return True
+            r.raise_for_status()
+            return True
     except requests.exceptions.HTTPError as e:
         if getattr(e.response, "status_code", None) != 412:
             raise
@@ -273,8 +272,8 @@ def upload_excel():
                     data=f,
                     timeout=120
                 )
-            r.raise_for_status()
-            return True
+                r.raise_for_status()
+                return True
         except requests.exceptions.HTTPError as e:
             if getattr(e.response, "status_code", None) != 412:
                 raise
@@ -333,6 +332,7 @@ def tg_send_message(chat_id, text):
 # Helpers de fuentes (Code39 y texto)
 # =====================================================================
 STRICT_BARCODE_FONT = True
+
 def _load_font_safe(path_or_name, size):
     candidates = []
     p = str(path_or_name or "").strip()
@@ -433,13 +433,15 @@ def crear_tarjeta(nombre, codigo):
     img = Image.new("RGB", (CARD_W, CARD_H), "white")
     draw = ImageDraw.Draw(img)
     f_name = _load_font_safe(FONT_TEXT, 64)
-    f_bar  = _load_font_safe(FONT_CODE39, 160)
-    f_txt  = _load_font_safe(FONT_TEXT, 36)
+    f_bar = _load_font_safe(FONT_CODE39, 160)
+    f_txt = _load_font_safe(FONT_TEXT, 36)
 
+    # Nombre centrado
     bbox_name = draw.textbbox((0, 0), nombre, font=f_name)
     tw = bbox_name[2] - bbox_name[0]
     draw.text(((CARD_W - tw)/2, 40), nombre, fill="black", font=f_name)
 
+    # Código en Code39 (con asteriscos)
     bar = f"*{codigo}*"
     bbox_bar = draw.textbbox((0, 0), bar, font=f_bar)
     bw = bbox_bar[2] - bbox_bar[0]
@@ -447,6 +449,7 @@ def crear_tarjeta(nombre, codigo):
     y_bar = (CARD_H // 2) - 60
     draw.text(((CARD_W - bw)/2, y_bar), bar, fill="black", font=f_bar)
 
+    # Texto del código
     bbox_code = draw.textbbox((0, 0), codigo, font=f_txt)
     tw2 = bbox_code[2] - bbox_code[0]
     draw.text(((CARD_W - tw2)/2, y_bar + bh + 10), codigo, fill="#333333", font=f_txt)
@@ -496,7 +499,6 @@ def generar_tarjetas_y_enviar():
         png = crear_tarjeta(nombre, codigo)
         tg_send_photo(GROUP_CHAT_ID, png, f"{nombre}\nClase: {clase}")
         safe_upload_image_to_onedrive(f"{nombre.replace(' ','_')}_{codigo}.png", png.getvalue())
-
         df.at[i, "Tarjeta generada"] = now_str
         hechos += 1
         candidatos += 1
@@ -506,40 +508,47 @@ def generar_tarjetas_y_enviar():
         with pd.ExcelWriter(ALUMNOS_XLSX_LOCAL, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
             df.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
         safe_upload_excel()
-
     app.logger.info(f"[GEN] candidatos={candidatos} hechos={hechos}")
     return hechos
 
 # =====================================================================
-# NUEVO: cálculo de última asistencia y permiso (columnas I..T)
+# NUEVO: cálculo de última asistencia y permiso (dinámico por encabezados fecha)
 # =====================================================================
 def asistencia_info_from_columns_I_T(df: pd.DataFrame, row_idx: int):
-    cols = list(df.columns)
-    if len(cols) < 9:
-        return "", False
-    start, end = 8, min(19, len(cols) - 1)
-    found_heads = []
-    for j in range(start, end + 1):
-        mark = df.iat[row_idx, j] if j < len(df.columns) else ""
-        mark = (str(mark).strip().lower() if mark is not None else "")
-        if mark == "x":
-            found_heads.append(str(cols[j]).strip())
-    if not found_heads:
-        return "", False
-
-    parsed = []
-    for h in found_heads:
-        ts = pd.to_datetime(h, errors="coerce", dayfirst=True)
+    """
+    Sustitución dinámica:
+      - Detecta columnas cuyo encabezado "parece" fecha (p. ej., '16-ene', '2026-02-02 00:00:00', '4-feb', etc.).
+      - 'x' (en minúscula) indica asistencia.
+      - Devuelve (ultima_asistencia, True/False).
+      - Si no hay columnas de fecha o no hay 'x', devuelve ("", False).
+    """
+    date_cols = []
+    for j, h in enumerate(list(df.columns)):
+        h_str = str(h).strip()
+        ts = pd.to_datetime(h_str, errors="coerce", dayfirst=True)
         if pd.isna(ts):
-            ts = pd.to_datetime(h, errors="coerce", dayfirst=False)
-        parsed.append((h, ts))
+            ts = pd.to_datetime(h_str, errors="coerce", dayfirst=False)
+        if not pd.isna(ts):
+            date_cols.append((j, ts))
 
-    valid_parsed = [(h, ts) for (h, ts) in parsed if not pd.isna(ts)]
-    if valid_parsed:
-        h_latest = max(valid_parsed, key=lambda t: t[1])[0]
-        return h_latest, True
-    else:
-        return found_heads[-1], True
+    if not date_cols:
+        return "", False
+
+    marked = []
+    for j, ts in date_cols:
+        try:
+            val = df.iat[row_idx, j]
+        except Exception:
+            val = ""
+        mark = (str(val).strip().lower() if val is not None else "")
+        if mark == "x":
+            marked.append((j, ts))
+
+    if not marked:
+        return "", False
+
+    j_latest, ts_latest = max(marked, key=lambda t: t[1])
+    return str(df.columns[j_latest]).strip(), True
 
 # =====================================================================
 # Utilidades de extracción/diagnóstico para barKoder
@@ -587,9 +596,9 @@ def _normalize_codigo_digits_first(codigo_raw: str) -> str:
 def _best_effort_parse_body():
     """
     Intenta parsear:
-    - JSON (application/json o texto JSON)
-    - application/x-www-form-urlencoded (request.form)
-    - Raw text (último recurso)
+     - JSON (application/json o texto JSON)
+     - application/x-www-form-urlencoded (request.form)
+     - Raw text (último recurso)
     Devuelve (dict, raw_preview)
     """
     body = request.get_json(silent=True)
@@ -627,16 +636,15 @@ def _best_effort_parse_body():
         return {}, None
 
 # =====================================================================
-# Webhook Barkoder
+# Webhook Barkoder (LIMPIO Y UNIFICADO)
 # =====================================================================
-
 @app.post("/barkoder-scan")
 def barkoder_scan():
     try:
         # Parseo tolerante del cuerpo (JSON, form, o raw)
         body, _ = _best_effort_parse_body()
 
-        # Acepta security_data/securityData y security_hash/securityHash (camelCase, etc.)
+        # security_data + security_hash (admite camelCase)
         security_data = str(
             body.get("security_data")
             or body.get("securityData")
@@ -651,17 +659,23 @@ def barkoder_scan():
         ).strip()
 
         if not security_data or not security_hash:
-            # No avisamos a Telegram; solo respondemos al cliente
+            try:
+                tg_send_message(GROUP_CHAT_ID, "⚠️ Barkoder: parámetros incompletos (security_data/security_hash).")
+            except Exception:
+                pass
             return jsonify(status=False, message="Parámetros incompletos"), 200
 
-        # Verificación tolerante del hash: md5(security_data + secret)
-        sec_raw  = BARKODER_SECRET
+        # Verificación tolerante del hash: md5(security_data + secret) con y sin strip
+        sec_raw = BARKODER_SECRET
         sec_trim = (BARKODER_SECRET or "").strip()
-        sdata    = str(security_data)
-        expected_a = hashlib.md5((sdata + sec_raw ).encode("utf-8")).hexdigest()
+        sdata = str(security_data)
+        expected_a = hashlib.md5((sdata + sec_raw).encode("utf-8")).hexdigest()
         expected_b = hashlib.md5((sdata + sec_trim).encode("utf-8")).hexdigest()
         if security_hash not in (expected_a, expected_b):
-            # No avisamos a Telegram; solo respondemos al cliente
+            try:
+                tg_send_message(GROUP_CHAT_ID, "⚠️ Barkoder: hash inválido. Revisa el Secret word (sin espacios).")
+            except Exception:
+                pass
             return jsonify(status=False, message="Hash inválido"), 200
 
         # data: JSON o Base64(JSON) o JSON en otros campos. Si no, usa el body completo.
@@ -685,63 +699,6 @@ def barkoder_scan():
             else:
                 data_json = {}
         except Exception as e:
-            # No avisamos a Telegram; solo respondemos al cliente
-            return jsonify(status=False, message=f"data inválido: {e}"), 200
-
-        # Extraer código y normalizar a dígitos si existen
-        codigo_raw = _extract_codigo_robusto(data_json)
-        if not codigo_raw:
-            return jsonify(status=False, message="No se encontró código en data"), 200
-
-        codigo = _normalize_codigo_digits_first(str(codigo_raw))
-
-        # Procesar (esto es lo que ENVÍA el VEREDICTO a Telegram)
-        ok, msg = procesar_codigo(str(codigo).strip())
-
-        # Respuesta HTTP al llamador
-        return jsonify(status=bool(ok), message=msg), 200
-
-    except Exception as e:
-        # Sin mensajes “recibido”; solo devolvemos el error al cliente
-        app.logger.exception("Error en barkoder-scan")
-        return jsonify(status=False, message=f"Excepción: {e}"), 200
-
-        # --- Verificación tolerante del hash ---
-        # md5(security_data + secret_word) tolerando espacios accidentales
-        sec_raw = BARKODER_SECRET
-        sec_trim = (BARKODER_SECRET or "").strip()
-        sdata_str = str(security_data)
-        expected_a = hashlib.md5((sdata_str + sec_raw).encode("utf-8")).hexdigest()
-        expected_b = hashlib.md5((sdata_str + sec_trim).encode("utf-8")).hexdigest()
-        if security_hash not in (expected_a, expected_b):
-            try:
-                tg_send_message(GROUP_CHAT_ID, "⚠️ Barkoder: hash inválido (security_hash). Revisa espacios en el Secret word de la app.")
-            except Exception:
-                pass
-            return jsonify(status=False, message="Hash inválido"), 200
-
-        # --- data: JSON o Base64(JSON) o JSON dentro del body en distintos campos ---
-        data_field = (
-            body.get("data")
-            or body.get("payload")
-            or body.get("value")
-            or body.get("result")
-            or body  # fallback: usa el body completo
-        )
-        try:
-            if isinstance(data_field, (dict, list)):
-                data_json = data_field
-            elif isinstance(data_field, str):
-                # 1) Intentar Base64 -> JSON
-                try:
-                    decoded = base64.b64decode(data_field)
-                    data_json = json.loads(decoded.decode("utf-8"))
-                except Exception:
-                    # 2) Intentar JSON directo
-                    data_json = json.loads(data_field)
-            else:
-                data_json = {}
-        except Exception as e:
             try:
                 prev = str(data_field)[:240]
                 tg_send_message(GROUP_CHAT_ID, f"⚠️ Barkoder: data inválido. Prev: {prev}")
@@ -749,7 +706,7 @@ def barkoder_scan():
                 pass
             return jsonify(status=False, message=f"data inválido: {e}"), 200
 
-        # Extracción robusta del código + normalización a dígitos si existen
+        # Extraer código y normalizar a dígitos si existen
         codigo_raw = _extract_codigo_robusto(data_json)
         if not codigo_raw:
             prev = _json_preview(data_json)
@@ -763,6 +720,8 @@ def barkoder_scan():
 
         # Procesa (escribe en Registros + envía mensaje con nombre, última asistencia y veredicto)
         ok, msg = procesar_codigo(str(codigo).strip())
+
+        # Respuesta HTTP al llamador
         return jsonify(status=bool(ok), message=msg), 200
 
     except Exception as e:
@@ -795,13 +754,14 @@ def _get_col(df: pd.DataFrame, *names):
     raise KeyError(f"No se encontró ninguna de las columnas: {names}")
 
 # =====================================================================
-# Procesar códigos (usa I..T + columnas tolerantes)
+# Procesar códigos (usa columnas de fecha dinámicas + columnas tolerantes)
 # =====================================================================
 def procesar_codigo(codigo):
     if not CODE_REGEX.match(codigo):
         return False, "Código inválido"
 
     df = load_df()
+
     try:
         col_codigo = _get_col(df, "Código", "Codigo")
     except Exception:
@@ -825,6 +785,7 @@ def procesar_codigo(codigo):
     nombre = f"{row.get(col_nom,'')} {row.get(col_ape,'')}".strip()
     clase = str(row.get(col_cls,"")).strip()
 
+    # Nueva lógica dinámica de asistencia por columnas de fecha
     ultima_asistencia, puede_ingresar = asistencia_info_from_columns_I_T(df, row_idx)
 
     fecha = time.strftime("%Y-%m-%d")
@@ -834,7 +795,7 @@ def procesar_codigo(codigo):
     veredicto = "✅ Admitido" if puede_ingresar else "⛔️ No tiene asistencias suficientes"
     ultima_txt = ultima_asistencia if ultima_asistencia else "—"
     texto = (
-        f"📇 {nombre}\n"
+        f"📧 {nombre}\n"
         f"• Clase: {clase or '—'}\n"
         f"• Última asistencia: {ultima_txt}\n"
         f"• Veredicto: {veredicto}\n"
@@ -990,7 +951,6 @@ def force_refresh():
         safe_download_excel_wait_fresh()
         df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
         df = _ensure_required_columns_and_types(df)
-
         def is_candidate(row):
             try:
                 col_codigo = _get_col(df, "Código", "Codigo")
@@ -1003,7 +963,6 @@ def force_refresh():
             if not pd.isna(tg_val) and str(tg_val).strip() != "":
                 return False
             return True
-
         candidatos = int(df.apply(is_candidate, axis=1).sum())
         total = int(len(df))
         return jsonify(ok=True, total_filas=total, candidatos=candidatos)
@@ -1026,7 +985,6 @@ def purge_cache():
         safe_download_excel_wait_fresh()
         df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
         df = _ensure_required_columns_and_types(df)
-
         def is_candidate(row):
             try:
                 col_codigo = _get_col(df, "Código", "Codigo")
@@ -1039,7 +997,6 @@ def purge_cache():
             if not pd.isna(tg_val) and str(tg_val).strip() != "":
                 return False
             return True
-
         candidatos = int(df.apply(is_candidate, axis=1).sum())
         total = int(len(df))
         return jsonify(ok=True, total_filas=total, candidatos=candidatos)
