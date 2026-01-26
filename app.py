@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import os, io, time, json, base64, hashlib, re, random, unicodedata
 from urllib.parse import quote, quote as urlquote
@@ -64,7 +63,7 @@ GROUP_CHAT_ID = int(os.environ["GROUP_CHAT_ID"])
 BARKODER_SECRET = os.environ["BARKODER_SECRET"]
 ONEDRIVE_SHARE_LINK = os.environ["ONEDRIVE_SHARE_LINK"]
 
-EVIDENCIAS_FOLDER = "Evidencias CJ"
+EVIDENCIAS_FOLDER = "Evidencias CJ"  # carpeta en OneDrive para PNGs opcionales
 ALUMNOS_XLSX_LOCAL = "alumnos.xlsx"
 SHEET_ALUMNOS = "Control Asistencia"
 SHEET_REGISTROS = "Registros"
@@ -162,15 +161,16 @@ def download_excel():
         f.write(r.content)
 
 def download_excel_wait_fresh():
-    meta,_ = None,None
+    # Simplificado: descarga y actualiza el eTag en Redis (sin bucles de espera)
     try:
-        meta,etag_now = get_item_meta(_get_token_or_raise()),None
-        etag_now = meta[1] if isinstance(meta,tuple) else meta.get("eTag")
+        meta = get_item_meta(_get_token_or_raise())
+        etag_now = meta.get("eTag")
     except:
-        pass
+        etag_now = None
     download_excel()
     try:
-        redis_set(REDIS_LAST_ETAG_KEY, etag_now, 3600)
+        if etag_now:
+            redis_set(REDIS_LAST_ETAG_KEY, etag_now, 3600)
     except:
         pass
 
@@ -182,13 +182,34 @@ def upload_excel():
         r=requests.put(url,headers={"Authorization":f"Bearer {token}","If-Match":"*"},data=f,timeout=120)
     r.raise_for_status()
 
+def upload_image_to_onedrive(filename, content):
+    """Sube un PNG de evidencia a la carpeta EVIDENCIAS_FOLDER en OneDrive."""
+    token = _get_token_or_raise()
+    # Asegurar carpeta
+    url_check = f"{GRAPH_ROOT}/me/drive/root:/{quote(EVIDENCIAS_FOLDER)}"
+    r = requests.get(url_check, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    if r.status_code == 404:
+        r2 = requests.post(
+            f"{GRAPH_ROOT}/me/drive/root/children",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"name": EVIDENCIAS_FOLDER, "folder": {}, "@microsoft.graph.conflictBehavior": "replace"},
+            timeout=30
+        )
+        r2.raise_for_status()
+    elif r.status_code != 200:
+        r.raise_for_status()
+    # Subir archivo
+    url_put = f"{GRAPH_ROOT}/me/drive/root:/{quote(EVIDENCIAS_FOLDER)}/{quote(filename)}:/content"
+    r3 = requests.put(url_put, headers={"Authorization": f"Bearer {token}"}, data=content, timeout=120)
+    r3.raise_for_status()
+
 # =====================================================================
 # TELEGRAM
 # =====================================================================
 def tg_send_message(chat_id,text):
     try:
         url=f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        requests.post(url,json={"chat_id":chat_id,"text":text},timeout=20)
+        requests.post(url,json={"chat_id":chat_id,"text":text,"disable_web_page_preview":True},timeout=20)
     except:
         pass
 
@@ -254,7 +275,7 @@ def save_df_and_registro(df,codigo,nombre,clase,fecha,conf):
     upload_excel()
 
 # =====================================================================
-# ASISTENCIA DINÁMICA
+# ASISTENCIA DINÁMICA (encabezados que sean fecha + 'x')
 # =====================================================================
 def asistencia_dinamica(df,row_idx):
     date_cols=[]
@@ -272,7 +293,7 @@ def asistencia_dinamica(df,row_idx):
     marcas=[]
     for j,ts in date_cols:
         val=df.iat[row_idx,j]
-        mark=str(val).strip().lower() if val else ""
+        mark=str(val).strip().lower() if val is not None else ""
         if mark=="x":
             marcas.append((j,ts))
 
@@ -283,7 +304,7 @@ def asistencia_dinamica(df,row_idx):
     return str(df.columns[j_latest]), True
 
 # =====================================================================
-# CODIGO — extracción robusta
+# CÓDIGO — extracción robusta + normalización + Base64 si aplica
 # =====================================================================
 def extraer_codigo(data):
     keys=["value","textualData","text","barcodeData","data","code","content"]
@@ -309,12 +330,22 @@ def extraer_codigo(data):
             if c:return c
     return ""
 
+def decode_base64_if_needed(s):
+    """Si s es Base64 válido y decodifica a dígitos, devolver decodificado; si no, dejar igual."""
+    try:
+        decoded = base64.b64decode(s).decode("utf-8")
+        if decoded.isdigit():
+            return decoded
+        return s
+    except:
+        return s
+
 def normalizar_codigo(c):
     d="".join(ch for ch in c if ch.isdigit())
     return d if d else c.strip()
 
 # =====================================================================
-# PROCESAR CODIGO
+# PROCESAR CÓDIGO
 # =====================================================================
 def procesar_codigo(codigo):
     df=load_df()
@@ -362,7 +393,7 @@ def barkoder_scan():
         if not body:
             body=request.form.to_dict() if request.form else {}
             if not body:
-                raw=request.get_data(as_text=True)
+                raw=request.get_data(as_text=True) or ""
                 try:
                     body=json.loads(raw)
                 except:
@@ -417,6 +448,9 @@ def barkoder_scan():
             tg_send_message(GROUP_CHAT_ID,"⚠️ Barkoder: no se encontró código")
             return jsonify(status=False,message="No se encontró código"),200
 
+        # NUEVO: decodificar Base64 si aplica
+        raw_code = decode_base64_if_needed(raw_code)
+
         codigo=normalizar_codigo(raw_code)
 
         ok,msg=procesar_codigo(codigo)
@@ -427,15 +461,8 @@ def barkoder_scan():
         return jsonify(status=False,message=str(e)),200
 
 # =====================================================================
-# FIN PARTE 1/2
-# =====================================================================
-
-
-
-# =====================================================================
 # TARJETAS PNG (Code39)
 # =====================================================================
-
 STRICT_BARCODE_FONT = True
 
 def _load_font_safe(path_or_name, size):
@@ -463,7 +490,6 @@ def _load_font_safe(path_or_name, size):
         raise RuntimeError(f"No se pudo cargar ninguna fuente válida: {last_err}")
     else:
         return ImageFont.load_default()
-
 
 def crear_tarjeta(nombre, codigo):
     img = Image.new("RGB", (CARD_W, CARD_H), "white")
@@ -507,11 +533,9 @@ def crear_tarjeta(nombre, codigo):
     buf.seek(0)
     return buf
 
-
 # =====================================================================
 # GENERAR TARJETAS (Batch)
 # =====================================================================
-
 def generar_tarjetas_y_enviar():
     df = load_df()
     hechos = 0
@@ -532,6 +556,12 @@ def generar_tarjetas_y_enviar():
         png = crear_tarjeta(nombre, codigo)
         tg_send_photo(GROUP_CHAT_ID, png, f"{nombre}\nClase: {clase}")
 
+        # Subir evidencia a OneDrive (opcional)
+        try:
+            upload_image_to_onedrive(f"{nombre.replace(' ','_')}_{codigo}.png", png.getvalue())
+        except:
+            pass
+
         df.at[i, "Tarjeta generada"] = now_str
         hechos += 1
 
@@ -543,15 +573,12 @@ def generar_tarjetas_y_enviar():
 
     return hechos
 
-
 # =====================================================================
 # UI / PREVIEW / REFRESH / PURGE
 # =====================================================================
-
 @app.get("/generar-tarjetas-ui")
 def generar_tarjetas_ui():
     return render_template("generar_tarjetas.html")
-
 
 @app.get("/generar-tarjetas-preview")
 def generar_tarjetas_preview():
@@ -594,7 +621,6 @@ def generar_tarjetas_preview():
     except Exception as e:
         return jsonify(error=str(e)), 500
 
-
 @app.post("/force-refresh")
 def force_refresh():
     try:
@@ -614,7 +640,6 @@ def force_refresh():
 
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 500
-
 
 @app.post("/purge-cache")
 def purge_cache():
@@ -637,11 +662,9 @@ def purge_cache():
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 500
 
-
 # =====================================================================
 # GENERAR TARJETAS (POST)
 # =====================================================================
-
 @app.route("/generar-tarjetas", methods=["POST", "GET"])
 def generar_tarjetas():
     if request.method == "GET":
@@ -652,11 +675,9 @@ def generar_tarjetas():
     except Exception as e:
         return jsonify(status=False, error=str(e)), 500
 
-
 # =====================================================================
 # BK-TEST
 # =====================================================================
-
 @app.post("/bk-test")
 def bk_test():
     try:
@@ -667,11 +688,9 @@ def bk_test():
         pass
     return jsonify(status=True, message="ok"),200
 
-
 # =====================================================================
-# AUTH (init-auth / finish-auth)
+# AUTH (init-auth / finish-auth / status)
 # =====================================================================
-
 @app.get("/init-auth")
 def init_auth():
     try:
@@ -693,7 +712,6 @@ def init_auth():
 
     except Exception as e:
         return jsonify(error=str(e)), 500
-
 
 @app.get("/finish-auth")
 def finish_auth():
@@ -720,17 +738,14 @@ def finish_auth():
     except Exception as e:
         return jsonify(error=str(e)), 500
 
-
 @app.get("/auth-status")
 def auth_status():
     tok = _acquire_token_silent()
     return jsonify({"authenticated": bool(tok)})
 
-
 # =====================================================================
 # DEBUG DESCARGA DE EXCEL
 # =====================================================================
-
 @app.get("/_debug/alumnos.xlsx")
 def _debug_excel():
     try:
@@ -740,10 +755,8 @@ def _debug_excel():
     except Exception as e:
         return jsonify(error=str(e)),500
 
-
 # =====================================================================
 # MAIN
 # =====================================================================
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT","8080")))
