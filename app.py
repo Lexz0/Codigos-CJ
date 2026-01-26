@@ -562,50 +562,111 @@ def _extract_codigo_robusto(data_json):
     return ""
 
 # =====================================================================
+# BEST-EFFORT BODY PARSER (JSON o form-urlencoded o raw)
+# =====================================================================
+def _best_effort_parse_body():
+    """
+    Intenta parsear:
+      - JSON (application/json o texto JSON)
+      - application/x-www-form-urlencoded (request.form)
+      - Raw text (último recurso)
+    Devuelve (dict, raw_preview)
+    """
+    body = request.get_json(silent=True)
+    raw_preview = None
+    if body is not None:
+        try:
+            raw_preview = _json_preview(body)
+        except Exception:
+            pass
+        return body, raw_preview
+    # form-urlencoded
+    try:
+        form = request.form.to_dict() if request.form else {}
+    except Exception:
+        form = {}
+    if form:
+        try:
+            raw_preview = _json_preview(form)
+        except Exception:
+            raw_preview = str(form)[:360]
+        return form, raw_preview
+    # raw
+    try:
+        raw = request.get_data(cache=False, as_text=True) or ""
+        raw_preview = raw[:360]
+        if raw.strip().startswith("{") or raw.strip().startswith("["):
+            try:
+                return json.loads(raw), raw_preview
+            except Exception:
+                pass
+        return {}, raw_preview
+    except Exception:
+        return {}, None
+
+# =====================================================================
 # Webhook Barkoder
 # =====================================================================
 @app.post("/barkoder-scan")
 def barkoder_scan():
     try:
-        body = request.get_json(force=True, silent=True) or {}
+        # Parseo tolerante del cuerpo
+        body, prev_preview = _best_effort_parse_body()
+
+        # Traza temprana (para ver qué llega)
+        try:
+            ua = request.headers.get("User-Agent","")
+            p = prev_preview or _json_preview(body)
+            tg_send_message(GROUP_CHAT_ID, f"📥 /barkoder-scan recibido\nUA:{ua}\nBody:{p}")
+        except Exception:
+            pass
+
         security_data = str(body.get("security_data","")).strip()
         security_hash = str(body.get("security_hash","")).strip()
-        data_field = body.get("data")
-        if not security_data or not security_hash or data_field is None:
+        if not security_data or not security_hash or ("data" not in body):
             try:
                 tg_send_message(GROUP_CHAT_ID, "⚠️ Barkoder: parámetros incompletos en webhook.")
             except Exception:
                 pass
             return jsonify(status=False, message="Parámetros incompletos"), 200
 
-        expected = hashlib.md5((security_data + BARKODER_SECRET).encode("utf-8")).hexdigest()
-        if security_hash != expected:
+        # --- Verificación tolerante del hash ---
+        # md5(security_data + secret_word) pero tolerando espacios accidentales en el secreto del móvil
+        sec_raw   = BARKODER_SECRET
+        sec_trim  = (BARKODER_SECRET or "").strip()
+        sdata_str = str(security_data)
+        expected_a = hashlib.md5((sdata_str + sec_raw).encode("utf-8")).hexdigest()
+        expected_b = hashlib.md5((sdata_str + sec_trim).encode("utf-8")).hexdigest()
+        if security_hash not in (expected_a, expected_b):
             try:
-                tg_send_message(GROUP_CHAT_ID, "⚠️ Barkoder: hash inválido (security_hash).")
+                tg_send_message(GROUP_CHAT_ID, "⚠️ Barkoder: hash inválido (security_hash). Revisa espacios en el Secret word de la app.")
             except Exception:
                 pass
             return jsonify(status=False, message="Hash inválido"), 200
 
-        # Contrato del webhook barKoder: security_* + data (JSON o Base64(JSON))
-        # y respuesta {status:Boolean, message:String} si activas "Webhook confirmation feedback".
-        # Doc: https://barkoder.com/docs/v1/how-to/use-webhooks-demo-app
+        # --- data: JSON o Base64(JSON), incluso si vino en form como string ---
+        data_field = body.get("data")
         try:
-            if isinstance(data_field, str):
+            if isinstance(data_field, (dict, list)):
+                data_json = data_field
+            elif isinstance(data_field, str):
+                # 1) Intentar Base64 -> JSON
                 try:
                     decoded = base64.b64decode(data_field)
                     data_json = json.loads(decoded.decode("utf-8"))
                 except Exception:
+                    # 2) Intentar JSON directo
                     data_json = json.loads(data_field)
             else:
-                data_json = data_field
+                data_json = {}
         except Exception as e:
-            prev = _json_preview(data_field)
             try:
-                tg_send_message(GROUP_CHAT_ID, f"⚠️ Barkoder: data inválido. Prev: {prev}")
+                tg_send_message(GROUP_CHAT_ID, f"⚠️ Barkoder: data inválido. Prev: {str(data_field)[:240]}")
             except Exception:
                 pass
             return jsonify(status=False, message=f"data inválido: {e}"), 200
 
+        # Extracción robusta del código
         codigo = _extract_codigo_robusto(data_json)
         if not codigo:
             prev = _json_preview(data_json)
@@ -615,6 +676,7 @@ def barkoder_scan():
                 pass
             return jsonify(status=False, message="No se encontró código en data"), 200
 
+        # Procesa (escribe en Registros + envía mensaje con nombre, última asistencia y veredicto)
         ok, msg = procesar_codigo(str(codigo).strip())
         return jsonify(status=bool(ok), message=msg), 200
 
@@ -910,7 +972,9 @@ def generar_tarjetas():
         app.logger.exception("generar-tarjetas error")
         return jsonify(status=False, error=str(e)), 500
 
-# --- BK TEST ENDPOINT (sonda) ---
+# =====================================================================
+# BK TEST ENDPOINT (sonda rápida de conectividad desde el móvil)
+# =====================================================================
 @app.post("/bk-test")
 def bk_test():
     try:
