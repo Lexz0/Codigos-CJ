@@ -88,7 +88,7 @@ FONT_TEXT = os.environ.get("FONT_TEXT", "NotoSans-Regular.ttf")
 FONT_CODE39 = os.environ.get("FONT_CODE39", "IDAutomationHC39M.ttf")
 CARD_W, CARD_H = 900, 500
 
-# ⚠️ Tu regex actual acepta solamente números (coincide con tus códigos tipo 2601001)
+# Códigos numéricos (p.ej. 2601001)
 CODE_REGEX = re.compile(r"^[0-9]{1,64}$")
 
 AZURE_CLIENT_ID = os.environ["AZURE_CLIENT_ID"]
@@ -472,6 +472,17 @@ def save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=False):
         regs.to_excel(w, sheet_name=SHEET_REGISTROS, index=False)
     safe_upload_excel()
 
+    # (Opcional) Aviso del archivo actualizado para evitar confusiones (personal vs sharepoint)
+    try:
+        token = _get_token_or_raise()
+        meta = get_item_meta(token)
+        web = meta.get("webUrl","")
+        name = meta.get("name","(sin nombre)")
+        host = "onedrive.live.com" if "onedrive.live.com" in web else ("sharepoint" if "sharepoint.com" in web else "desconocido")
+        tg_send_message(GROUP_CHAT_ID, f"🗂️ Excel actualizado: {name}\nHost: {host}\n{web}")
+    except Exception:
+        pass
+
 # =====================================================================
 # PNG Tarjetas
 # =====================================================================
@@ -572,18 +583,60 @@ def asistencia_info_from_columns_I_T(df: pd.DataFrame, row_idx: int):
     for h in found_heads:
         ts = pd.to_datetime(h, errors="coerce", dayfirst=True)
         if pd.isna(ts):
-            # Reintento sin dayfirst por si el formato es mm/dd/yyyy
             ts = pd.to_datetime(h, errors="coerce", dayfirst=False)
         parsed.append((h, ts))
 
     valid_parsed = [(h, ts) for (h, ts) in parsed if not pd.isna(ts)]
     if valid_parsed:
-        # Elige la mayor por fecha
         h_latest = max(valid_parsed, key=lambda t: t[1])[0]
         return h_latest, True
     else:
-        # Sin parseo posible, elegimos la más a la derecha (última en la fila)
         return found_heads[-1], True
+
+# =====================================================================
+# Utilidades de extracción/diagnóstico para barKoder
+# =====================================================================
+def _json_preview(obj, limit=360):
+    try:
+        s = json.dumps(obj, ensure_ascii=False)
+        return (s[:limit] + "…") if len(s) > limit else s
+    except Exception:
+        return str(obj)[:limit]
+
+def _extract_codigo_robusto(data_json):
+    """
+    Acepta formatos típicos del webhook de barKoder.
+    - data_json puede ser dict o list[dict]
+    - claves posibles: value, textualData, text, barcodeData, data, code, content
+    - también puede venir dentro de data_json["result"]{...}
+    """
+    keys = ["value", "textualData", "text", "barcodeData", "data", "code", "content"]
+
+    def from_dict(d):
+        if not isinstance(d, dict):
+            return ""
+        for k in keys:
+            v = d.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        res = d.get("result") or {}
+        if isinstance(res, dict):
+            for k in keys:
+                v = res.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        return ""
+
+    if isinstance(data_json, dict):
+        c = from_dict(data_json)
+        if c:
+            return c
+    elif isinstance(data_json, list):
+        for elem in data_json:
+            c = from_dict(elem)
+            if c:
+                return c
+    return ""
 
 # =====================================================================
 # Webhook Barkoder
@@ -596,14 +649,25 @@ def barkoder_scan():
         security_hash = str(body.get("security_hash","")).strip()
         data_field = body.get("data")
         if not security_data or not security_hash or data_field is None:
+            try:
+                tg_send_message(GROUP_CHAT_ID, "⚠️ Barkoder: parámetros incompletos en webhook.")
+            except Exception:
+                pass
             return jsonify(status=False, message="Parámetros incompletos"), 200
 
         expected = hashlib.md5((security_data + BARKODER_SECRET).encode("utf-8")).hexdigest()
         if security_hash != expected:
+            try:
+                tg_send_message(GROUP_CHAT_ID, "⚠️ Barkoder: hash inválido (security_hash).")
+            except Exception:
+                pass
             return jsonify(status=False, message="Hash inválido"), 200
 
-        # 'data' puede venir como JSON o como Base64->JSON según la app barKoder
-        # (el contrato del webhook y el hash MD5 están documentados por barKoder)
+        # 'data' puede venir como JSON o Base64->JSON (según configuración de la app barKoder)
+        # Contrato del webhook documentado por barKoder:
+        # - security_data, security_hash (MD5 de security_data + secret_word)
+        # - data: JSON o Base64(JSON)
+        # - respuesta esperada {status:Boolean, message:String} si habilitan "Webhook confirmation feedback"
         # https://barkoder.com/docs/v1/how-to/use-webhooks-demo-app
         try:
             if isinstance(data_field, str):
@@ -615,31 +679,37 @@ def barkoder_scan():
             else:
                 data_json = data_field
         except Exception as e:
+            prev = _json_preview(data_field)
+            try:
+                tg_send_message(GROUP_CHAT_ID, f"⚠️ Barkoder: data inválido. Prev: {prev}")
+            except Exception:
+                pass
             return jsonify(status=False, message=f"data inválido: {e}"), 200
 
-        codigo = None
-        if isinstance(data_json, list):
-            if len(data_json) == 0:
-                return jsonify(status=False, message="Lista vacía"), 200
-            elem = data_json[0]
-            if isinstance(elem, dict):
-                codigo = elem.get("value","") or elem.get("codevalue","")
-        elif isinstance(data_json, dict):
-            codigo = data_json.get("value","") or data_json.get("codevalue","")
-
+        # Extracción robusta del código
+        codigo = _extract_codigo_robusto(data_json)
         if not codigo:
-            return jsonify(status=False, message="No se encontró 'value'"), 200
+            prev = _json_preview(data_json)
+            try:
+                tg_send_message(GROUP_CHAT_ID, f"⚠️ Barkoder: no se encontró código en data. Prev: {prev}")
+            except Exception:
+                pass
+            return jsonify(status=False, message="No se encontró código en data"), 200
 
-        codigo = str(codigo).strip()
-        ok, msg = procesar_codigo(codigo)
+        # Procesa (escribe en Registros + envía mensaje con nombre, última asistencia y veredicto)
+        ok, msg = procesar_codigo(str(codigo).strip())
         return jsonify(status=bool(ok), message=msg), 200
 
     except Exception as e:
         app.logger.exception("Error en barkoder-scan")
+        try:
+            tg_send_message(GROUP_CHAT_ID, f"⚠️ Error en /barkoder-scan: {e}")
+        except Exception:
+            pass
         return jsonify(status=False, message=f"Excepción: {e}"), 200
 
 # =====================================================================
-# Procesar códigos (ACTUALIZADO con lógica de asistencias I..T)
+# Procesar códigos (con lógica de asistencias I..T + veredicto)
 # =====================================================================
 def procesar_codigo(codigo):
     if not CODE_REGEX.match(codigo):
@@ -656,7 +726,7 @@ def procesar_codigo(codigo):
     nombre = f"{row.get('Nombres','')} {row.get('Apellidos','')}".strip()
     clase = str(row.get("Clase a la que asiste","")).strip()
 
-    # NUEVO: calcular última asistencia y permiso desde columnas I..T
+    # Calcular última asistencia y permiso desde columnas I..T
     ultima_asistencia, puede_ingresar = asistencia_info_from_columns_I_T(df, row_idx)
 
     # Guardar en 'Registros' (fecha = día del escaneo)
@@ -752,7 +822,7 @@ def _debug_excel_download():
         resp = send_file(
             ALUMNOS_XLSX_LOCAL,
             as_attachment=True,
-            download_name=unique_name  # <-- ESTE ES EL FIX REAL
+            download_name=unique_name  # <-- evita cache
         )
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
         resp.headers["Pragma"] = "no-cache"
@@ -791,7 +861,6 @@ def generar_tarjetas_preview():
             elif not CODE_REGEX.match(codigo_raw):
                 valido = False
                 motivo.append("Código no cumple regex (solo dígitos)")
-            # Solo marcar como "ya generada" si NO está vacío/NaN
             if not pd.isna(tg_val) and str(tg_val).strip() != "":
                 valido = False
                 motivo.append("Ya tenía 'Tarjeta generada'")
