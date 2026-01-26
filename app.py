@@ -260,25 +260,25 @@ def upload_excel():
     except requests.exceptions.HTTPError as e:
         if getattr(e.response, "status_code", None) != 412:
             raise
-    try:
-        meta = get_item_meta(token)
-        etag = meta.get("eTag") or meta.get("@microsoft.graph.etag")
-        if not etag:
-            raise RuntimeError("No se pudo obtener eTag del archivo.")
-        with open(ALUMNOS_XLSX_LOCAL, "rb") as f:
-            r = requests.put(
-                url,
-                headers={"Authorization": f"Bearer {token}", "If-Match": etag},
-                data=f,
-                timeout=120
-            )
-        r.raise_for_status()
-        return True
-    except requests.exceptions.HTTPError as e:
-        if getattr(e.response, "status_code", None) != 412:
-            raise
-    upload_excel_via_session(token, item["id"])
-    return True
+        try:
+            meta = get_item_meta(token)
+            etag = meta.get("eTag") or meta.get("@microsoft.graph.etag")
+            if not etag:
+                raise RuntimeError("No se pudo obtener eTag del archivo.")
+            with open(ALUMNOS_XLSX_LOCAL, "rb") as f:
+                r = requests.put(
+                    url,
+                    headers={"Authorization": f"Bearer {token}", "If-Match": etag},
+                    data=f,
+                    timeout=120
+                )
+            r.raise_for_status()
+            return True
+        except requests.exceptions.HTTPError as e:
+            if getattr(e.response, "status_code", None) != 412:
+                raise
+            upload_excel_via_session(token, item["id"])
+            return True
 
 def upload_image_to_onedrive(filename, content):
     token = _get_token_or_raise()
@@ -323,7 +323,8 @@ def tg_send_photo(chat_id, png_bytesio, caption=""):
 
 def tg_send_message(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    r = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=30)
+    payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    r = requests.post(url, json=payload, timeout=30)
     r.raise_for_status()
     return r.json()
 
@@ -431,20 +432,24 @@ def crear_tarjeta(nombre, codigo):
     img = Image.new("RGB", (CARD_W, CARD_H), "white")
     draw = ImageDraw.Draw(img)
     f_name = _load_font_safe(FONT_TEXT, 64)
-    f_bar = _load_font_safe(FONT_CODE39, 160)
-    f_txt = _load_font_safe(FONT_TEXT, 36)
+    f_bar  = _load_font_safe(FONT_CODE39, 160)
+    f_txt  = _load_font_safe(FONT_TEXT, 36)
+
     bbox_name = draw.textbbox((0, 0), nombre, font=f_name)
     tw = bbox_name[2] - bbox_name[0]
     draw.text(((CARD_W - tw)/2, 40), nombre, fill="black", font=f_name)
+
     bar = f"*{codigo}*"
     bbox_bar = draw.textbbox((0, 0), bar, font=f_bar)
     bw = bbox_bar[2] - bbox_bar[0]
     bh = bbox_bar[3] - bbox_bar[1]
     y_bar = (CARD_H // 2) - 60
     draw.text(((CARD_W - bw)/2, y_bar), bar, fill="black", font=f_bar)
+
     bbox_code = draw.textbbox((0, 0), codigo, font=f_txt)
     tw2 = bbox_code[2] - bbox_code[0]
     draw.text(((CARD_W - tw2)/2, y_bar + bh + 10), codigo, fill="#333333", font=f_txt)
+
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)
@@ -459,18 +464,20 @@ def generar_tarjetas_y_enviar():
     candidatos = 0
     now_str = time.strftime("%Y-%m-%d %H:%M:%S")
     candidate_indices = []
+
     for i, row in df.iterrows():
         try:
             col_codigo = _get_col(df, "Código", "Codigo")
-            codigo = str(row.get(col_codigo, "")).strip()
         except Exception:
-            codigo = str(row.get("Código", "")).strip()
+            col_codigo = "Código"
+        codigo = str(row.get(col_codigo, "")).strip()
         if not codigo or not CODE_REGEX.match(codigo):
             continue
         tg_val = row.get("Tarjeta generada", "")
         if not pd.isna(tg_val) and str(tg_val).strip() != "":
             continue
         candidate_indices.append(i)
+
     for i in candidate_indices:
         row = df.loc[i]
         try:
@@ -480,20 +487,25 @@ def generar_tarjetas_y_enviar():
             col_cls = _get_col(df, "Clase a la que asiste", "Clase", "Clase a la que Asiste")
         except Exception:
             col_codigo = "Código"; col_nom="Nombres"; col_ape="Apellidos"; col_cls="Clase a la que asiste"
+
         codigo = str(row.get(col_codigo, "")).strip()
         nombre = f"{row.get(col_nom,'')} {row.get(col_ape,'')}".strip()
         clase = str(row.get(col_cls,"")).strip()
+
         png = crear_tarjeta(nombre, codigo)
         tg_send_photo(GROUP_CHAT_ID, png, f"{nombre}\nClase: {clase}")
         safe_upload_image_to_onedrive(f"{nombre.replace(' ','_')}_{codigo}.png", png.getvalue())
+
         df.at[i, "Tarjeta generada"] = now_str
         hechos += 1
         candidatos += 1
+
     if hechos > 0:
         df = _ensure_required_columns_and_types(df)
         with pd.ExcelWriter(ALUMNOS_XLSX_LOCAL, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
             df.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
         safe_upload_excel()
+
     app.logger.info(f"[GEN] candidatos={candidatos} hechos={hechos}")
     return hechos
 
@@ -513,12 +525,14 @@ def asistencia_info_from_columns_I_T(df: pd.DataFrame, row_idx: int):
             found_heads.append(str(cols[j]).strip())
     if not found_heads:
         return "", False
+
     parsed = []
     for h in found_heads:
         ts = pd.to_datetime(h, errors="coerce", dayfirst=True)
         if pd.isna(ts):
             ts = pd.to_datetime(h, errors="coerce", dayfirst=False)
         parsed.append((h, ts))
+
     valid_parsed = [(h, ts) for (h, ts) in parsed if not pd.isna(ts)]
     if valid_parsed:
         h_latest = max(valid_parsed, key=lambda t: t[1])[0]
@@ -561,15 +575,20 @@ def _extract_codigo_robusto(data_json):
             if c: return c
     return ""
 
+def _normalize_codigo_digits_first(codigo_raw: str) -> str:
+    # Si trae *123* o letras, nos quedamos con los dígitos si existen.
+    only_digits = "".join(ch for ch in codigo_raw if ch.isdigit())
+    return only_digits if only_digits else codigo_raw.strip()
+
 # =====================================================================
 # BEST-EFFORT BODY PARSER (JSON o form-urlencoded o raw)
 # =====================================================================
 def _best_effort_parse_body():
     """
     Intenta parsear:
-      - JSON (application/json o texto JSON)
-      - application/x-www-form-urlencoded (request.form)
-      - Raw text (último recurso)
+    - JSON (application/json o texto JSON)
+    - application/x-www-form-urlencoded (request.form)
+    - Raw text (último recurso)
     Devuelve (dict, raw_preview)
     """
     body = request.get_json(silent=True)
@@ -580,6 +599,7 @@ def _best_effort_parse_body():
         except Exception:
             pass
         return body, raw_preview
+
     # form-urlencoded
     try:
         form = request.form.to_dict() if request.form else {}
@@ -591,6 +611,7 @@ def _best_effort_parse_body():
         except Exception:
             raw_preview = str(form)[:360]
         return form, raw_preview
+
     # raw
     try:
         raw = request.get_data(cache=False, as_text=True) or ""
@@ -621,19 +642,29 @@ def barkoder_scan():
         except Exception:
             pass
 
-        security_data = str(body.get("security_data","")).strip()
-        security_hash = str(body.get("security_hash","")).strip()
-        if not security_data or not security_hash or ("data" not in body):
-            try:
-                tg_send_message(GROUP_CHAT_ID, "⚠️ Barkoder: parámetros incompletos en webhook.")
-            except Exception:
-                pass
+        # Acepta security_data/securityData y security_hash/securityHash
+        security_data = str(
+            body.get("security_data")
+            or body.get("securityData")
+            or body.get("security data")
+            or ""
+        ).strip()
+        security_hash = str(
+            body.get("security_hash")
+            or body.get("securityHash")
+            or body.get("security hash")
+            or ""
+        ).strip()
+
+        if not security_data or not security_hash:
+            try: tg_send_message(GROUP_CHAT_ID, "⚠️ Barkoder: faltan security_data/security_hash.")
+            except Exception: pass
             return jsonify(status=False, message="Parámetros incompletos"), 200
 
         # --- Verificación tolerante del hash ---
-        # md5(security_data + secret_word) pero tolerando espacios accidentales en el secreto del móvil
-        sec_raw   = BARKODER_SECRET
-        sec_trim  = (BARKODER_SECRET or "").strip()
+        # md5(security_data + secret_word) tolerando espacios accidentales
+        sec_raw = BARKODER_SECRET
+        sec_trim = (BARKODER_SECRET or "").strip()
         sdata_str = str(security_data)
         expected_a = hashlib.md5((sdata_str + sec_raw).encode("utf-8")).hexdigest()
         expected_b = hashlib.md5((sdata_str + sec_trim).encode("utf-8")).hexdigest()
@@ -644,8 +675,14 @@ def barkoder_scan():
                 pass
             return jsonify(status=False, message="Hash inválido"), 200
 
-        # --- data: JSON o Base64(JSON), incluso si vino en form como string ---
-        data_field = body.get("data")
+        # --- data: JSON o Base64(JSON) o JSON dentro del body en distintos campos ---
+        data_field = (
+            body.get("data")
+            or body.get("payload")
+            or body.get("value")
+            or body.get("result")
+            or body  # fallback: usa el body completo
+        )
         try:
             if isinstance(data_field, (dict, list)):
                 data_json = data_field
@@ -661,20 +698,23 @@ def barkoder_scan():
                 data_json = {}
         except Exception as e:
             try:
-                tg_send_message(GROUP_CHAT_ID, f"⚠️ Barkoder: data inválido. Prev: {str(data_field)[:240]}")
+                prev = str(data_field)[:240]
+                tg_send_message(GROUP_CHAT_ID, f"⚠️ Barkoder: data inválido. Prev: {prev}")
             except Exception:
                 pass
             return jsonify(status=False, message=f"data inválido: {e}"), 200
 
-        # Extracción robusta del código
-        codigo = _extract_codigo_robusto(data_json)
-        if not codigo:
+        # Extracción robusta del código + normalización a dígitos si existen
+        codigo_raw = _extract_codigo_robusto(data_json)
+        if not codigo_raw:
             prev = _json_preview(data_json)
             try:
                 tg_send_message(GROUP_CHAT_ID, f"⚠️ Barkoder: no se encontró código en data. Prev: {prev}")
             except Exception:
                 pass
             return jsonify(status=False, message="No se encontró código en data"), 200
+
+        codigo = _normalize_codigo_digits_first(str(codigo_raw))
 
         # Procesa (escribe en Registros + envía mensaje con nombre, última asistencia y veredicto)
         ok, msg = procesar_codigo(str(codigo).strip())
@@ -721,8 +761,11 @@ def procesar_codigo(codigo):
         col_codigo = _get_col(df, "Código", "Codigo")
     except Exception:
         col_codigo = "Código"
+
     filt = df[col_codigo].astype(str).str.strip() == codigo
     if not filt.any():
+        try: tg_send_message(GROUP_CHAT_ID, f"⛔️ Código no encontrado: {codigo}")
+        except Exception: pass
         return False, "Código no encontrado"
 
     row_idx = df.index[filt][0]
@@ -735,7 +778,7 @@ def procesar_codigo(codigo):
         col_nom="Nombres"; col_ape="Apellidos"; col_cls="Clase a la que asiste"
 
     nombre = f"{row.get(col_nom,'')} {row.get(col_ape,'')}".strip()
-    clase  = str(row.get(col_cls,"")).strip()
+    clase = str(row.get(col_cls,"")).strip()
 
     ultima_asistencia, puede_ingresar = asistencia_info_from_columns_I_T(df, row_idx)
 
@@ -743,7 +786,7 @@ def procesar_codigo(codigo):
     save_df_and_append_registro(df, codigo, nombre, clase, fecha, conf=puede_ingresar)
 
     ts_now = time.strftime("%Y-%m-%d %H:%M:%S")
-    veredicto = "✅ Puede ingresar" if puede_ingresar else "⛔️ No tiene asistencias suficientes"
+    veredicto = "✅ Admitido" if puede_ingresar else "⛔️ No tiene asistencias suficientes"
     ultima_txt = ultima_asistencia if ultima_asistencia else "—"
     texto = (
         f"📇 {nombre}\n"
@@ -869,14 +912,11 @@ def generar_tarjetas_preview():
             motivo = []
             valido = True
             if not codigo_raw:
-                valido = False
-                motivo.append("Sin código")
+                valido = False; motivo.append("Sin código")
             elif not CODE_REGEX.match(codigo_raw):
-                valido = False
-                motivo.append("Código no cumple regex (solo dígitos)")
+                valido = False; motivo.append("Código no cumple regex (solo dígitos)")
             if not pd.isna(tg_val) and str(tg_val).strip() != "":
-                valido = False
-                motivo.append("Ya tenía 'Tarjeta generada'")
+                valido = False; motivo.append("Ya tenía 'Tarjeta generada'")
             resultados.append({
                 "nombre": nombre or "—",
                 "clase": clase or "—",
@@ -905,6 +945,7 @@ def force_refresh():
         safe_download_excel_wait_fresh()
         df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
         df = _ensure_required_columns_and_types(df)
+
         def is_candidate(row):
             try:
                 col_codigo = _get_col(df, "Código", "Codigo")
@@ -917,6 +958,7 @@ def force_refresh():
             if not pd.isna(tg_val) and str(tg_val).strip() != "":
                 return False
             return True
+
         candidatos = int(df.apply(is_candidate, axis=1).sum())
         total = int(len(df))
         return jsonify(ok=True, total_filas=total, candidatos=candidatos)
@@ -939,6 +981,7 @@ def purge_cache():
         safe_download_excel_wait_fresh()
         df = pd.read_excel(ALUMNOS_XLSX_LOCAL, sheet_name=SHEET_ALUMNOS, engine="openpyxl")
         df = _ensure_required_columns_and_types(df)
+
         def is_candidate(row):
             try:
                 col_codigo = _get_col(df, "Código", "Codigo")
@@ -951,6 +994,7 @@ def purge_cache():
             if not pd.isna(tg_val) and str(tg_val).strip() != "":
                 return False
             return True
+
         candidatos = int(df.apply(is_candidate, axis=1).sum())
         total = int(len(df))
         return jsonify(ok=True, total_filas=total, candidatos=candidatos)
