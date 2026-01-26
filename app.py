@@ -910,6 +910,17 @@ def generar_tarjetas():
         app.logger.exception("generar-tarjetas error")
         return jsonify(status=False, error=str(e)), 500
 
+# --- BK TEST ENDPOINT (sonda) ---
+@app.post("/bk-test")
+def bk_test():
+    try:
+        raw = request.get_data(cache=False, as_text=True) or ""
+        ua = request.headers.get("User-Agent", "")
+        tg_send_message(GROUP_CHAT_ID, f"🛰️ /bk-test hit\nUA: {ua}\nBody: {raw[:240]}")
+    except Exception:
+        pass
+    return jsonify(status=True, message="ok (bk-test)"), 200
+
 # =====================================================================
 # MAIN
 # =====================================================================
