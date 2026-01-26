@@ -275,29 +275,29 @@ def save_df_and_registro(df, codigo, nombre, clase, fecha, conf):
 # =====================================================================
 # ASISTENCIA DINÁMICA (encabezados que sean fecha + 'x')
 # =====================================================================
+
 def asistencia_dinamica(df, row_idx):
-    date_cols = []
-    for j, col in enumerate(df.columns):
-        s = str(col).strip()
-        ts = pd.to_datetime(s, errors="coerce", dayfirst=True)
-        if pd.isna(ts):
-            ts = pd.to_datetime(s, errors="coerce", dayfirst=False)
-        if not pd.isna(ts):
-            date_cols.append((j, ts))
-    if not date_cols:
-        return "", False
+    # Las columnas I..T son índices 8 a 19 (0-based)
+    inicio = 8
+    fin = 20  # exclusivo
 
     marcas = []
-    for j, ts in date_cols:
+    for j in range(inicio, fin):
+        if j >= len(df.columns):
+            continue
         val = df.iat[row_idx, j]
         mark = str(val).strip().lower() if val is not None else ""
         if mark == "x":
-            marcas.append((j, ts))
+            # usamos index j como timestamp artificial solo para orden
+            marcas.append((j, j))
+
     if not marcas:
         return "", False
 
+    # Tomar la más reciente (la de mayor índice)
     j_latest, _ = max(marcas, key=lambda x: x[1])
     return str(df.columns[j_latest]), True
+
 
 # =====================================================================
 # CÓDIGO — extracción robusta + normalización + Base64 si aplica
