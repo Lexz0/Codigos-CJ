@@ -62,18 +62,14 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 GROUP_CHAT_ID = int(os.environ["GROUP_CHAT_ID"])
 BARKODER_SECRET = os.environ["BARKODER_SECRET"]
 ONEDRIVE_SHARE_LINK = os.environ["ONEDRIVE_SHARE_LINK"]
-
 EVIDENCIAS_FOLDER = "Evidencias CJ"  # carpeta en OneDrive para PNGs opcionales
 ALUMNOS_XLSX_LOCAL = "alumnos.xlsx"
 SHEET_ALUMNOS = "Control Asistencia"
 SHEET_REGISTROS = "Registros"
-
 FONT_TEXT = os.environ.get("FONT_TEXT", "NotoSans-Regular.ttf")
 FONT_CODE39 = os.environ.get("FONT_CODE39", "IDAutomationHC39M.ttf")
-
 CARD_W, CARD_H = 900, 500
-CODE_REGEX = re.compile(r"^[0-9]{1,64}$")
-
+CODE_REGEX = re.compile(r"^\[0-9\]{1,64}$")
 AZURE_CLIENT_ID = os.environ["AZURE_CLIENT_ID"]
 AZURE_TENANT = os.environ.get("AZURE_TENANT", "consumers")
 MSAL_CACHE_PATH = os.environ.get("MSAL_CACHE_PATH", "msal_cache.json")
@@ -179,7 +175,7 @@ def upload_excel():
     # CORREGIDO: eliminar If-Match:"*" para evitar 412 con enlaces compartidos
     with open(ALUMNOS_XLSX_LOCAL, "rb") as f:
         r = requests.put(url, headers={"Authorization": f"Bearer {token}"}, data=f, timeout=120)
-    r.raise_for_status()
+        r.raise_for_status()
 
 def upload_image_to_onedrive(filename, content):
     """Sube un PNG de evidencia a la carpeta EVIDENCIAS_FOLDER en OneDrive."""
@@ -265,22 +261,18 @@ def save_df_and_registro(df, codigo, nombre, clase, fecha, conf):
         "clase": clase,
         "fecha": fecha
     }])], ignore_index=True)
-
     with pd.ExcelWriter(ALUMNOS_XLSX_LOCAL, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
         df.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
         reg.to_excel(w, sheet_name=SHEET_REGISTROS, index=False)
-
     upload_excel()
 
 # =====================================================================
 # ASISTENCIA DINÁMICA (encabezados que sean fecha + 'x')
 # =====================================================================
-
 def asistencia_dinamica(df, row_idx):
     # Las columnas I..T son índices 8 a 19 (0-based)
     inicio = 8
     fin = 20  # exclusivo
-
     marcas = []
     for j in range(inicio, fin):
         if j >= len(df.columns):
@@ -290,21 +282,17 @@ def asistencia_dinamica(df, row_idx):
         if mark == "x":
             # usamos index j como timestamp artificial solo para orden
             marcas.append((j, j))
-
     if not marcas:
         return "", False
-
     # Tomar la más reciente (la de mayor índice)
     j_latest, _ = max(marcas, key=lambda x: x[1])
     return str(df.columns[j_latest]), True
-
 
 # =====================================================================
 # CÓDIGO — extracción robusta + normalización + Base64 si aplica
 # =====================================================================
 def extraer_codigo(data):
     keys = ["value", "textualData", "text", "barcodeData", "data", "code", "content"]
-
     def from_dict(d):
         if not isinstance(d, dict): return ""
         for k in keys:
@@ -318,7 +306,6 @@ def extraer_codigo(data):
                 if isinstance(v, str) and v.strip():
                     return v.strip()
         return ""
-
     if isinstance(data, dict):
         c = from_dict(data)
         if c: return c
@@ -349,20 +336,16 @@ def procesar_codigo(codigo):
     df = load_df()
     if "Código" not in df.columns:
         return False, "No hay columna Código"
-
     fila = df.index[df["Código"] == codigo]
     if len(fila) == 0:
         tg_send_message(GROUP_CHAT_ID, f"⛔️ Código no encontrado: {codigo}")
         return False, "Código no encontrado"
-
     idx = fila[0]
     row = df.loc[idx]
     nombre = f"{row.get('Nombres','')} {row.get('Apellidos','')}".strip()
     clase = str(row.get("Clase a la que asiste","")).strip()
     ultima, puede = asistencia_dinamica(df, idx)
-
     save_df_and_registro(df, codigo, nombre, clase, time.strftime("%Y-%m-%d"), puede)
-
     veredicto = "✅ Admitido" if puede else "⛔️ No tiene asistencias suficientes"
     ult = ultima if ultima else "—"
     msg = (
@@ -402,7 +385,6 @@ def barkoder_scan():
             or body.get("securityHash")
             or ""
         ).strip()
-
         if not sec_data or not sec_hash:
             tg_send_message(GROUP_CHAT_ID, "⚠️ Barkoder: parámetros incompletos")
             return jsonify(status=False, message="Parámetros incompletos"), 200
@@ -442,10 +424,8 @@ def barkoder_scan():
         # NUEVO: decodificar Base64 si aplica
         raw_code = decode_base64_if_needed(raw_code)
         codigo = normalizar_codigo(raw_code)
-
         ok, msg = procesar_codigo(codigo)
         return jsonify(status=bool(ok), message=msg), 200
-
     except Exception as e:
         tg_send_message(GROUP_CHAT_ID, f"⚠️ Error en barkoder-scan: {e}")
         return jsonify(status=False, message=str(e)), 200
@@ -482,9 +462,10 @@ def _load_font_safe(path_or_name, size):
 def crear_tarjeta(nombre, codigo):
     img = Image.new("RGB", (CARD_W, CARD_H), "white")
     draw = ImageDraw.Draw(img)
+
     f_name = _load_font_safe(FONT_TEXT, 64)
-    f_bar  = _load_font_safe(FONT_CODE39, 160)
-    f_txt  = _load_font_safe(FONT_TEXT, 36)
+    f_bar = _load_font_safe(FONT_CODE39, 160)
+    f_txt = _load_font_safe(FONT_TEXT, 36)
 
     # Nombre
     bbox_name = draw.textbbox((0, 0), nombre, font=f_name)
@@ -519,6 +500,26 @@ def crear_tarjeta(nombre, codigo):
     img.save(buf, format="PNG")
     buf.seek(0)
     return buf
+# =====================================================================
+# === NUEVO: Helpers para nombre de archivo de evidencias en OneDrive ===
+# =====================================================================
+def _slugify(texto: str) -> str:
+    # Normaliza a ASCII (quita tildes), minúsculas, solo [a-z0-9_]
+    base = unicodedata.normalize("NFKD", texto or "").encode("ascii", "ignore").decode("ascii")
+    base = base.strip().lower()
+    base = re.sub(r"\s+", "_", base)          # espacios -> _
+    base = re.sub(r"[^a-z0-9_]+", "", base)   # deja solo a-z 0-9 _
+    base = re.sub(r"_+", "_", base).strip("_")
+    return base or "sin_nombre"
+
+def make_image_filename(nombres: str, apellidos: str, fecha_fmt: str = "%Y%m%d_%H%M%S",
+                        incluir_codigo: str | None = None, ext: str = "png") -> str:
+    nom = _slugify(nombres)
+    ape = _slugify(apellidos)
+    fecha = time.strftime(fecha_fmt)
+    codigo_slug = _slugify(incluir_codigo or "")
+    partes = [p for p in [nom, ape, fecha, codigo_slug] if p]
+    return "_".join(partes) + f".{ext}"
 
 # =====================================================================
 # GENERAR TARJETAS (Batch)
@@ -527,25 +528,27 @@ def generar_tarjetas_y_enviar():
     df = load_df()
     hechos = 0
     now_str = time.strftime("%Y-%m-%d %H:%M:%S")
-
     for i, row in df.iterrows():
         codigo = str(row.get("Código", "")).strip()
         if not codigo or not CODE_REGEX.match(codigo):
             continue
-
         tg_val = row.get("Tarjeta generada", "")
         if tg_val and tg_val.strip():
             continue
 
-        nombre = f"{row.get('Nombres','')} {row.get('Apellidos','')}".strip()
+        # ========== sin tocar la lógica, solo separamos nombres/apellidos ==========
+        nombres = str(row.get("Nombres","")).strip()
+        apellidos = str(row.get("Apellidos","")).strip()
+        nombre = f"{nombres} {apellidos}".strip()
         clase = str(row.get("Clase a la que asiste","")).strip()
 
         png = crear_tarjeta(nombre, codigo)
         tg_send_photo(GROUP_CHAT_ID, png, f"{nombre}\nClase: {clase}")
 
-        # Subir evidencia a OneDrive (opcional)
+        # Subir evidencia a OneDrive con nombre personalizado: nombres_apellidos_YYYYMMDD_HHMMSS[_codigo].png
         try:
-            upload_image_to_onedrive(f"{nombre.replace(' ','_')}_{codigo}.png", png.getvalue())
+            fn = make_image_filename(nombres, apellidos, fecha_fmt="%Y%m%d_%H%M%S", incluir_codigo=codigo, ext="png")
+            upload_image_to_onedrive(fn, png.getvalue())
         except:
             pass
 
@@ -557,7 +560,6 @@ def generar_tarjetas_y_enviar():
         with pd.ExcelWriter(ALUMNOS_XLSX_LOCAL, engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
             df.to_excel(w, sheet_name=SHEET_ALUMNOS, index=False)
         upload_excel()
-
     return hechos
 
 # =====================================================================
@@ -578,14 +580,12 @@ def generar_tarjetas_preview():
             clase = str(row.get("Clase a la que asiste","")).strip()
             motivo = []
             valido = True
-
             if not codigo:
                 valido = False; motivo.append("Sin código")
             elif not CODE_REGEX.match(codigo):
                 valido = False; motivo.append("Código inválido")
             if str(row.get("Tarjeta generada","")).strip():
                 valido = False; motivo.append("Ya tenía tarjeta")
-
             resultados.append({
                 "nombre": nombre or "—",
                 "clase": clase or "—",
@@ -593,7 +593,6 @@ def generar_tarjetas_preview():
                 "seria_generado": bool(valido),
                 "motivo_si_no": ", ".join(motivo) if motivo else "OK"
             })
-
         total = len(resultados)
         candidatos = sum(r["seria_generado"] for r in resultados)
         return jsonify({
@@ -611,12 +610,10 @@ def force_refresh():
             os.remove(ALUMNOS_XLSX_LOCAL)
         download_excel_wait_fresh()
         df = load_df()
-
         def is_candidate(row):
             codigo = str(row.get("Código","")).strip()
             tg = str(row.get("Tarjeta generada","")).strip()
             return codigo and CODE_REGEX.match(codigo) and not tg
-
         candidatos = int(df.apply(is_candidate, axis=1).sum())
         return jsonify(ok=True, total_filas=len(df), candidatos=candidatos)
     except Exception as e:
@@ -630,12 +627,10 @@ def purge_cache():
         redis_del(REDIS_LAST_ETAG_KEY)
         download_excel_wait_fresh()
         df = load_df()
-
         def is_candidate(row):
             codigo = str(row.get("Código","")).strip()
             tg = str(row.get("Tarjeta generada","")).strip()
             return codigo and CODE_REGEX.match(codigo) and not tg
-
         candidatos = int(df.apply(is_candidate, axis=1).sum())
         return jsonify(ok=True, total_filas=len(df), candidatos=candidatos)
     except Exception as e:
